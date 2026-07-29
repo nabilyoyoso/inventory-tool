@@ -32,6 +32,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Npgsql;
+using NpgsqlTypes;
 
 var config = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
@@ -83,17 +84,23 @@ var runner = new SyncRunner(source, target);
 await runner.RefreshMasterTableAsync(
     "SELECT STORE_CODE, STORE_NAME FROM STORE",
     "store",
-    new[] { "store_code", "store_name" });
+    new[] { "store_code", "store_name" },
+    new[] { NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.RefreshMasterTableAsync(
     "SELECT BARCODE, USER_BARCODE, NAME, category_name, sub_category_name FROM PRODUCT_FILE",
     "product_file",
-    new[] { "barcode", "user_barcode", "item_name", "category_name", "sub_category_name" });
+    new[] { "barcode", "user_barcode", "item_name", "category_name", "sub_category_name" },
+    new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.RefreshMasterTableAsync(
-    "SELECT BARCODE, SAL_BARCODE, SAL_CPU, SAL_PRICE FROM PRODUCT_STOCK",
+    // SAL_BARCODE alone is the true unique key (confirmed by the user) — GROUP BY
+    // it only, and pick a deterministic BARCODE/price if any real duplicates exist.
+    "SELECT MAX(BARCODE) AS BARCODE, SAL_BARCODE, MAX(SAL_CPU) AS SAL_CPU, MAX(SAL_PRICE) AS SAL_PRICE " +
+    "FROM PRODUCT_STOCK GROUP BY SAL_BARCODE",
     "product_stock",
-    new[] { "barcode", "sal_barcode", "sal_cpu", "sal_price" });
+    new[] { "barcode", "sal_barcode", "sal_cpu", "sal_price" },
+    new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
 
 // ---- Transactional data: incremental sync by date ----
 await runner.SyncIncrementalAsync(
@@ -104,7 +111,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, PUR_PRICE, PUR_QTY, SAL_BARCODE " +
         $"FROM PURCHASE_RCV_DETAILS WHERE PURCHASE_DATE >= @cutoff",
-    targetColumns: new[] { "memo_no", "purchase_date", "store_code", "barcode", "pur_price", "pur_qty", "sal_barcode" });
+    targetColumns: new[] { "memo_no", "purchase_date", "store_code", "barcode", "pur_price", "pur_qty", "sal_barcode" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDeliveryDetails",
@@ -114,7 +122,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT CHALLAN_NO, DELIVERY_DATE, STORE_CODE, DELIVERY_TO, BARCODE, CPU, DEL_QTY, SAL_BARCODE, SAL_PRICE, STATUS " +
         $"FROM STORE_DELIVERY_DETAILS WHERE DELIVERY_DATE >= @cutoff",
-    targetColumns: new[] { "challan_no", "delivery_date", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "sal_barcode", "sal_price", "status" });
+    targetColumns: new[] { "challan_no", "delivery_date", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "sal_barcode", "sal_price", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDeliveryReceive",
@@ -124,7 +133,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT CHALLAN_NO, STORE_CODE, DELIVERY_TO, BARCODE, CPU, DEL_QTY, RCV_QTY, RECEIVE_DATE, SAL_BARCODE, SAL_PRICE, STATUS " +
         $"FROM STOREDELIVERYRECEIVE WHERE RECEIVE_DATE >= @cutoff",
-    targetColumns: new[] { "challan_no", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "rcv_qty", "receive_date", "sal_barcode", "sal_price", "status" });
+    targetColumns: new[] { "challan_no", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "rcv_qty", "receive_date", "sal_barcode", "sal_price", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDml",
@@ -134,7 +144,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT STORE_CODE, REF_NO, DML_DATE, BARCODE, DML_QTY, SAL_BARCODE, SAL_PRICE, CPU " +
         $"FROM STORE_DML WHERE DML_DATE >= @cutoff",
-    targetColumns: new[] { "store_code", "ref_no", "dml_date", "barcode", "dml_qty", "sal_barcode", "sal_price", "cpu" });
+    targetColumns: new[] { "store_code", "ref_no", "dml_date", "barcode", "dml_qty", "sal_barcode", "sal_price", "cpu" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
 
 await runner.SyncIncrementalAsync(
     syncKey: "PurchaseReturnDetails",
@@ -144,7 +155,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, CPU, RTN_QTY, SAL_BARCODE " +
         $"FROM PURCHASE_RETURN_DETAILS WHERE RTN_DT >= @cutoff",
-    targetColumns: new[] { "challan_no", "rtn_date", "store_code", "barcode", "cpu", "rtn_qty", "sal_barcode" });
+    targetColumns: new[] { "challan_no", "rtn_date", "store_code", "barcode", "cpu", "rtn_qty", "sal_barcode" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "InvTrackingSummary",
@@ -154,7 +166,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT STORE_CODE, Barcode, sBarcode, AdjQty, SessionId, MRP, CPU, CAST(ScanStartDate AS DATE) AS AdjDate " +
         $"FROM InvTrackingSummary WHERE ScanStartDate >= @cutoff",
-    targetColumns: new[] { "store_code", "barcode", "sbarcode", "adj_qty", "session_id", "mrp", "cpu", "adj_date" });
+    targetColumns: new[] { "store_code", "barcode", "sbarcode", "adj_qty", "session_id", "mrp", "cpu", "adj_date" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Date });
 
 await runner.SyncIncrementalAsync(
     syncKey: "Sale",
@@ -164,7 +177,8 @@ await runner.SyncIncrementalAsync(
     buildSourceSql: cutoff =>
         $"SELECT INVOICE_NO, INVOICE_DT, BARCODE, SAL_BARCODE, CPU, MRP, SQTY, RQTY, STORE_CODE " +
         $"FROM SALE WHERE INVOICE_DT >= @cutoff",
-    targetColumns: new[] { "invoice_no", "invoice_dt", "barcode", "sal_barcode", "cpu", "mrp", "sqty", "rqty", "store_code" });
+    targetColumns: new[] { "invoice_no", "invoice_dt", "barcode", "sal_barcode", "cpu", "mrp", "sqty", "rqty", "store_code" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 Console.WriteLine($"=== Inventory sync finished: {DateTime.Now} ===");
 
@@ -185,7 +199,7 @@ class SyncRunner
     }
 
     /// <summary>Full refresh of a small master table: wipe it, reload it.</summary>
-    public async Task RefreshMasterTableAsync(string sourceSql, string targetTable, string[] targetColumns)
+    public async Task RefreshMasterTableAsync(string sourceSql, string targetTable, string[] targetColumns, NpgsqlDbType[] targetTypes)
     {
         Console.WriteLine($"--- Refreshing master table: {targetTable} ---");
         try
@@ -207,7 +221,7 @@ class SyncRunner
             using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
                 await truncate.ExecuteNonQueryAsync();
 
-            await BulkInsertAsync(targetTable, targetColumns, rows);
+            await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
             Console.WriteLine($"    {targetTable}: {rows.Count} rows loaded.");
         }
         catch (Exception ex)
@@ -228,7 +242,8 @@ class SyncRunner
         string sourceDateColumn,
         string targetDateColumn,
         Func<string, string> buildSourceSql,
-        string[] targetColumns)
+        string[] targetColumns,
+        NpgsqlDbType[] targetTypes)
     {
         Console.WriteLine($"--- Syncing: {targetTable} ---");
         try
@@ -258,7 +273,7 @@ class SyncRunner
                 await del.ExecuteNonQueryAsync();
             }
 
-            await BulkInsertAsync(targetTable, targetColumns, rows);
+            await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
 
             DateTime newCutoff = rows.Count > 0 ? DateTime.Now.Date : cutoff;
             await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count);
@@ -294,10 +309,11 @@ class SyncRunner
 
     /// <summary>
     /// Fast bulk load using Postgres's native COPY protocol — this is what makes
-    /// millions of rows load in seconds/minutes instead of hours. This replaces
-    /// the old approach of inserting one row at a time.
+    /// millions of rows load in seconds/minutes instead of hours. Each column's
+    /// exact type is specified explicitly (rather than letting Npgsql guess from
+    /// the .NET value) because guessing gets date columns wrong.
     /// </summary>
-    private async Task BulkInsertAsync(string table, string[] columns, List<object?[]> rows)
+    private async Task BulkInsertAsync(string table, string[] columns, NpgsqlDbType[] types, List<object?[]> rows)
     {
         if (rows.Count == 0) return;
 
@@ -308,12 +324,15 @@ class SyncRunner
         foreach (var row in rows)
         {
             await writer.StartRowAsync();
-            foreach (var val in row)
+            for (int i = 0; i < row.Length; i++)
             {
+                var val = row[i];
                 if (val == null)
                     await writer.WriteNullAsync();
+                else if (types[i] == NpgsqlDbType.Date && val is DateTime dt)
+                    await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
                 else
-                    await writer.WriteAsync(val);
+                    await writer.WriteAsync(val, types[i]);
             }
         }
 
