@@ -204,14 +204,10 @@ class SyncRunner
                 }
             }
 
-            using var tx = await _target.BeginTransactionAsync();
-            using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target, (NpgsqlTransaction)tx))
+            using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
                 await truncate.ExecuteNonQueryAsync();
 
-            foreach (var row in rows)
-                await InsertRowAsync(targetTable, targetColumns, row, (NpgsqlTransaction)tx);
-
-            await tx.CommitAsync();
+            await BulkInsertAsync(targetTable, targetColumns, rows);
             Console.WriteLine($"    {targetTable}: {rows.Count} rows loaded.");
         }
         catch (Exception ex)
@@ -255,22 +251,18 @@ class SyncRunner
                 }
             }
 
-            using var tx = await _target.BeginTransactionAsync();
-
             using (var del = new NpgsqlCommand(
-                $"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target, (NpgsqlTransaction)tx))
+                $"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target))
             {
                 del.Parameters.AddWithValue("cutoff", cutoff.Date);
                 await del.ExecuteNonQueryAsync();
             }
 
-            foreach (var row in rows)
-                await InsertRowAsync(targetTable, targetColumns, row, (NpgsqlTransaction)tx);
+            await BulkInsertAsync(targetTable, targetColumns, rows);
 
             DateTime newCutoff = rows.Count > 0 ? DateTime.Now.Date : cutoff;
-            await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count, (NpgsqlTransaction)tx);
+            await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count);
 
-            await tx.CommitAsync();
             Console.WriteLine($"    {targetTable}: {rows.Count} rows synced (from {cutoff:yyyy-MM-dd} onward).");
         }
         catch (Exception ex)
@@ -289,24 +281,42 @@ class SyncRunner
         return (result == null || result is DBNull) ? null : (DateTime)result;
     }
 
-    private async Task UpdateSyncLogAsync(string syncKey, DateTime syncedThrough, int rowCount, NpgsqlTransaction tx)
+    private async Task UpdateSyncLogAsync(string syncKey, DateTime syncedThrough, int rowCount)
     {
         using var cmd = new NpgsqlCommand(
             "UPDATE sync_log SET last_synced_date = @d, last_synced_at = now(), rows_synced = @r WHERE table_name = @key",
-            _target, tx);
+            _target);
         cmd.Parameters.AddWithValue("d", syncedThrough);
         cmd.Parameters.AddWithValue("r", rowCount);
         cmd.Parameters.AddWithValue("key", syncKey);
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task InsertRowAsync(string table, string[] columns, object?[] values, NpgsqlTransaction tx)
+    /// <summary>
+    /// Fast bulk load using Postgres's native COPY protocol — this is what makes
+    /// millions of rows load in seconds/minutes instead of hours. This replaces
+    /// the old approach of inserting one row at a time.
+    /// </summary>
+    private async Task BulkInsertAsync(string table, string[] columns, List<object?[]> rows)
     {
+        if (rows.Count == 0) return;
+
         string colList = string.Join(", ", columns);
-        string paramList = string.Join(", ", columns.Select((c, i) => $"@p{i}"));
-        using var cmd = new NpgsqlCommand($"INSERT INTO {table} ({colList}) VALUES ({paramList})", _target, tx);
-        for (int i = 0; i < values.Length; i++)
-            cmd.Parameters.AddWithValue($"p{i}", values[i] ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync();
+        await using var writer = await _target.BeginBinaryImportAsync(
+            $"COPY {table} ({colList}) FROM STDIN (FORMAT BINARY)");
+
+        foreach (var row in rows)
+        {
+            await writer.StartRowAsync();
+            foreach (var val in row)
+            {
+                if (val == null)
+                    await writer.WriteNullAsync();
+                else
+                    await writer.WriteAsync(val);
+            }
+        }
+
+        await writer.CompleteAsync();
     }
 }
