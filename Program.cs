@@ -109,10 +109,10 @@ await runner.SyncIncrementalAsync(
     sourceDateColumn: "PURCHASE_DATE",
     targetDateColumn: "purchase_date",
     buildSourceSql: cutoff =>
-        $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, PUR_PRICE, PUR_QTY, SAL_BARCODE " +
+        $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, PUR_PRICE, PUR_QTY, SAL_BARCODE, STATUS " +
         $"FROM PURCHASE_RCV_DETAILS WHERE PURCHASE_DATE >= @cutoff",
-    targetColumns: new[] { "memo_no", "purchase_date", "store_code", "barcode", "pur_price", "pur_qty", "sal_barcode" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "memo_no", "purchase_date", "store_code", "barcode", "pur_price", "pur_qty", "sal_barcode", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDeliveryDetails",
@@ -142,10 +142,10 @@ await runner.SyncIncrementalAsync(
     sourceDateColumn: "DML_DATE",
     targetDateColumn: "dml_date",
     buildSourceSql: cutoff =>
-        $"SELECT STORE_CODE, REF_NO, DML_DATE, BARCODE, DML_QTY, SAL_BARCODE, SAL_PRICE, CPU " +
+        $"SELECT STORE_CODE, REF_NO, DML_DATE, BARCODE, DML_QTY, SAL_BARCODE, SAL_PRICE, CPU, STATUS " +
         $"FROM STORE_DML WHERE DML_DATE >= @cutoff",
-    targetColumns: new[] { "store_code", "ref_no", "dml_date", "barcode", "dml_qty", "sal_barcode", "sal_price", "cpu" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
+    targetColumns: new[] { "store_code", "ref_no", "dml_date", "barcode", "dml_qty", "sal_barcode", "sal_price", "cpu", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "PurchaseReturnDetails",
@@ -153,10 +153,10 @@ await runner.SyncIncrementalAsync(
     sourceDateColumn: "RTN_DT",
     targetDateColumn: "rtn_date",
     buildSourceSql: cutoff =>
-        $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, CPU, RTN_QTY, SAL_BARCODE " +
+        $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, CPU, RTN_QTY, SAL_BARCODE, STATUS " +
         $"FROM PURCHASE_RETURN_DETAILS WHERE RTN_DT >= @cutoff",
-    targetColumns: new[] { "challan_no", "rtn_date", "store_code", "barcode", "cpu", "rtn_qty", "sal_barcode" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "rtn_date", "store_code", "barcode", "cpu", "rtn_qty", "sal_barcode", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "InvTrackingSummary",
