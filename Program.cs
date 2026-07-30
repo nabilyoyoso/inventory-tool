@@ -157,33 +157,48 @@ class SyncRunner
 
     public async Task RefreshMasterTableAsync(string sourceSql, string targetTable, string[] targetColumns, NpgsqlDbType[] targetTypes)
     {
-        Console.WriteLine($"--- Refreshing master table: {targetTable} ---");
-        try
+        const int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var rows = new List<object?[]>();
-            using (var cmd = new SqlCommand(sourceSql, _source))
-            using (var reader = await cmd.ExecuteReaderAsync())
+            Console.WriteLine(attempt == 1
+                ? $"--- Refreshing master table: {targetTable} ---"
+                : $"--- Retrying master table: {targetTable} (attempt {attempt}/{maxAttempts}) ---");
+            try
             {
-                while (await reader.ReadAsync())
+                var rows = new List<object?[]>();
+                using (var cmd = new SqlCommand(sourceSql, _source))
+                using (var reader = await cmd.ExecuteReaderAsync())
                 {
-                    var row = new object?[reader.FieldCount];
-                    reader.GetValues(row!);
-                    for (int i = 0; i < row.Length; i++)
-                        if (row[i] is DBNull) row[i] = null;
-                    rows.Add(row);
+                    while (await reader.ReadAsync())
+                    {
+                        var row = new object?[reader.FieldCount];
+                        reader.GetValues(row!);
+                        for (int i = 0; i < row.Length; i++)
+                            if (row[i] is DBNull) row[i] = null;
+                        rows.Add(row);
+                    }
+                }
+
+                using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
+                    await truncate.ExecuteNonQueryAsync();
+
+                await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
+                Console.WriteLine($"    {targetTable}: {rows.Count} rows loaded.");
+                return; // success — stop retrying
+            }
+            catch (Exception ex)
+            {
+                if (attempt == maxAttempts)
+                {
+                    Console.WriteLine($"    !! Failed syncing {targetTable} after {maxAttempts} attempts. Error (screenshot/copy this):");
+                    Console.WriteLine("    " + ex.Message);
+                }
+                else
+                {
+                    Console.WriteLine($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry...");
+                    await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); // 5s, then 10s
                 }
             }
-
-            using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
-                await truncate.ExecuteNonQueryAsync();
-
-            await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
-            Console.WriteLine($"    {targetTable}: {rows.Count} rows loaded.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"    !! Failed syncing {targetTable}. Error (screenshot/copy this):");
-            Console.WriteLine("    " + ex.Message);
         }
     }
 
@@ -196,45 +211,60 @@ class SyncRunner
         string[] targetColumns,
         NpgsqlDbType[] targetTypes)
     {
-        Console.WriteLine($"--- Syncing: {targetTable} ---");
-        try
+        const int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            DateTime cutoff = await GetLastSyncedDateAsync(syncKey) ?? new DateTime(2000, 1, 1);
-
-            var rows = new List<object?[]>();
-            string sql = buildSourceSql(sourceDateColumn);
-            using (var cmd = new SqlCommand(sql, _source))
+            Console.WriteLine(attempt == 1
+                ? $"--- Syncing: {targetTable} ---"
+                : $"--- Retrying: {targetTable} (attempt {attempt}/{maxAttempts}) ---");
+            try
             {
-                cmd.Parameters.AddWithValue("@cutoff", cutoff);
-                using var reader = await cmd.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                DateTime cutoff = await GetLastSyncedDateAsync(syncKey) ?? new DateTime(2000, 1, 1);
+
+                var rows = new List<object?[]>();
+                string sql = buildSourceSql(sourceDateColumn);
+                using (var cmd = new SqlCommand(sql, _source))
                 {
-                    var row = new object?[reader.FieldCount];
-                    reader.GetValues(row!);
-                    for (int i = 0; i < row.Length; i++)
-                        if (row[i] is DBNull) row[i] = null;
-                    rows.Add(row);
+                    cmd.Parameters.AddWithValue("@cutoff", cutoff);
+                    using var reader = await cmd.ExecuteReaderAsync();
+                    while (await reader.ReadAsync())
+                    {
+                        var row = new object?[reader.FieldCount];
+                        reader.GetValues(row!);
+                        for (int i = 0; i < row.Length; i++)
+                            if (row[i] is DBNull) row[i] = null;
+                        rows.Add(row);
+                    }
+                }
+
+                using (var del = new NpgsqlCommand(
+                    $"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target))
+                {
+                    del.Parameters.AddWithValue("cutoff", cutoff.Date);
+                    await del.ExecuteNonQueryAsync();
+                }
+
+                await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
+
+                DateTime newCutoff = rows.Count > 0 ? DateTime.Now.Date : cutoff;
+                await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count);
+
+                Console.WriteLine($"    {targetTable}: {rows.Count} rows synced (from {cutoff:yyyy-MM-dd} onward).");
+                return; // success — stop retrying
+            }
+            catch (Exception ex)
+            {
+                if (attempt == maxAttempts)
+                {
+                    Console.WriteLine($"    !! Failed syncing {targetTable} after {maxAttempts} attempts. Error (screenshot/copy this):");
+                    Console.WriteLine("    " + ex.Message);
+                }
+                else
+                {
+                    Console.WriteLine($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry...");
+                    await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); // 5s, then 10s
                 }
             }
-
-            using (var del = new NpgsqlCommand(
-                $"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target))
-            {
-                del.Parameters.AddWithValue("cutoff", cutoff.Date);
-                await del.ExecuteNonQueryAsync();
-            }
-
-            await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
-
-            DateTime newCutoff = rows.Count > 0 ? DateTime.Now.Date : cutoff;
-            await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count);
-
-            Console.WriteLine($"    {targetTable}: {rows.Count} rows synced (from {cutoff:yyyy-MM-dd} onward).");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"    !! Failed syncing {targetTable}. Error (screenshot/copy this):");
-            Console.WriteLine("    " + ex.Message);
         }
     }
 
