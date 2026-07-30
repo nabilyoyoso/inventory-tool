@@ -1,32 +1,9 @@
 // ============================================================================
-// INVENTORY SYNC JOB
+// INVENTORY SYNC JOB — v2 (matches schema_v2.sql)
 // ============================================================================
-// What this does, in plain terms:
-//   1. Connects to your production ERP (SQL Server) using your READ-ONLY
-//      login. It only ever runs SELECT statements against that database —
-//      never INSERT/UPDATE/DELETE. It cannot change anything there.
-//   2. Connects to your Supabase (Postgres) database, where you DO have
-//      full permissions.
-//   3. Copies data across:
-//        - Master tables (Store, ProductFile, ProductStock) are small and
-//          change rarely, so they're fully refreshed every run.
-//        - Transactional tables (Sale, PurchaseRcvDetails, etc.) are synced
-//          incrementally: only rows dated on/after the last successful sync
-//          are re-pulled and re-inserted. This keeps it fast on repeat runs
-//          while staying correct if a run happens mid-day and misses late
-//          same-day entries (they get picked up next time).
-//
-// How to run it manually (to test):
-//   1. Edit appsettings.json with your real connection strings.
-//   2. Open a terminal in this folder and run:  dotnet run
-//   3. Watch the console output — it prints what it's doing, table by table.
-//
-// How to run it automatically (once it works):
-//   - Windows: Task Scheduler -> Create Task -> Trigger: Daily at (say) 2 AM
-//     -> Action: run "dotnet.exe" with argument pointing at the published
-//     InventorySync.dll. This runs on your own PC/server, so it costs
-//     nothing extra.
-//   - Mac/Linux: a cron entry calling `dotnet /path/to/InventorySync.dll`.
+// What changed from v1: table and column names now match the renamed
+// schema, every transactional table now carries its own status and
+// cpu/mrp columns, and PRODUCT_STOCK is keyed by SAL_BARCODE alone.
 // ============================================================================
 
 using Microsoft.Data.SqlClient;
@@ -36,11 +13,9 @@ using NpgsqlTypes;
 
 var config = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile("appsettings.json", optional: true)   // optional now — only used for local testing
+    .AddJsonFile("appsettings.json", optional: true)
     .Build();
 
-// GitHub Actions injects these as environment variables from encrypted Secrets.
-// appsettings.json is just a fallback for anyone testing on their own machine.
 string sourceConnStr = Environment.GetEnvironmentVariable("ERP_CONNECTION_STRING")
     ?? config["SourceConnectionString"]
     ?? throw new Exception("Missing ERP_CONNECTION_STRING (set it as a GitHub Actions secret, or in appsettings.json for local testing)");
@@ -53,34 +28,15 @@ Console.WriteLine($"=== Inventory sync started: {DateTime.Now} ===");
 using var source = new SqlConnection(sourceConnStr);
 using var target = new NpgsqlConnection(supabaseConnStr);
 
-try
-{
-    await source.OpenAsync();
-    Console.WriteLine("Connected to production ERP (read-only).");
-}
-catch (Exception ex)
-{
-    Console.WriteLine("!! Could not connect to the ERP database. Error below — this is exactly");
-    Console.WriteLine("!! the kind of message to screenshot and send back if it happens:");
-    Console.WriteLine(ex.Message);
-    return;
-}
+try { await source.OpenAsync(); Console.WriteLine("Connected to production ERP (read-only)."); }
+catch (Exception ex) { Console.WriteLine("!! Could not connect to the ERP database:"); Console.WriteLine(ex.Message); return; }
 
-try
-{
-    await target.OpenAsync();
-    Console.WriteLine("Connected to Supabase.");
-}
-catch (Exception ex)
-{
-    Console.WriteLine("!! Could not connect to Supabase. Error below:");
-    Console.WriteLine(ex.Message);
-    return;
-}
+try { await target.OpenAsync(); Console.WriteLine("Connected to Supabase."); }
+catch (Exception ex) { Console.WriteLine("!! Could not connect to Supabase:"); Console.WriteLine(ex.Message); return; }
 
 var runner = new SyncRunner(source, target);
 
-// ---- Master data: small tables, full refresh every run ----
+// ---- Master data: full refresh every run ----
 await runner.RefreshMasterTableAsync(
     "SELECT STORE_CODE, STORE_NAME FROM STORE",
     "store",
@@ -88,18 +44,17 @@ await runner.RefreshMasterTableAsync(
     new[] { NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.RefreshMasterTableAsync(
-    "SELECT BARCODE, USER_BARCODE, NAME, category_name, sub_category_name FROM PRODUCT_FILE",
+    "SELECT BARCODE, USER_BARCODE, category_name, sub_category_name, NAME FROM PRODUCT_FILE",
     "product_file",
-    new[] { "barcode", "user_barcode", "item_name", "category_name", "sub_category_name" },
+    new[] { "barcode", "user_barcode", "category", "sub_category", "item_name" },
     new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text });
 
 await runner.RefreshMasterTableAsync(
-    // SAL_BARCODE alone is the true unique key (confirmed by the user) — GROUP BY
-    // it only, and pick a deterministic BARCODE/price if any real duplicates exist.
+    // SAL_BARCODE alone is the true unique key — GROUP BY dedupes any real duplicates.
     "SELECT MAX(BARCODE) AS BARCODE, SAL_BARCODE, MAX(SAL_CPU) AS SAL_CPU, MAX(SAL_PRICE) AS SAL_PRICE " +
     "FROM PRODUCT_STOCK GROUP BY SAL_BARCODE",
     "product_stock",
-    new[] { "barcode", "sal_barcode", "sal_cpu", "sal_price" },
+    new[] { "barcode", "sal_barcode", "cpu", "mrp" },
     new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
 
 // ---- Transactional data: incremental sync by date ----
@@ -107,85 +62,87 @@ await runner.SyncIncrementalAsync(
     syncKey: "PurchaseRcvDetails",
     targetTable: "purchase_rcv_details",
     sourceDateColumn: "PURCHASE_DATE",
-    targetDateColumn: "purchase_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, PUR_PRICE, PUR_QTY, SAL_BARCODE, STATUS " +
+        $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, SAL_BARCODE, PUR_PRICE, SAL_PRICE, PUR_QTY, STATUS " +
         $"FROM PURCHASE_RCV_DETAILS WHERE PURCHASE_DATE >= @cutoff",
-    targetColumns: new[] { "memo_no", "purchase_date", "store_code", "barcode", "pur_price", "pur_qty", "sal_barcode", "status" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "pur_qty", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDeliveryDetails",
     targetTable: "store_delivery_details",
     sourceDateColumn: "DELIVERY_DATE",
-    targetDateColumn: "delivery_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT CHALLAN_NO, DELIVERY_DATE, STORE_CODE, DELIVERY_TO, BARCODE, CPU, DEL_QTY, SAL_BARCODE, SAL_PRICE, STATUS " +
+        $"SELECT CHALLAN_NO, DELIVERY_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, STATUS " +
         $"FROM STORE_DELIVERY_DETAILS WHERE DELIVERY_DATE >= @cutoff",
-    targetColumns: new[] { "challan_no", "delivery_date", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "sal_barcode", "sal_price", "status" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDeliveryReceive",
     targetTable: "store_delivery_receive",
     sourceDateColumn: "RECEIVE_DATE",
-    targetDateColumn: "receive_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT CHALLAN_NO, STORE_CODE, DELIVERY_TO, BARCODE, CPU, DEL_QTY, RCV_QTY, RECEIVE_DATE, SAL_BARCODE, SAL_PRICE, STATUS " +
+        $"SELECT CHALLAN_NO, RECEIVE_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, RCV_QTY, STATUS " +
         $"FROM STOREDELIVERYRECEIVE WHERE RECEIVE_DATE >= @cutoff",
-    targetColumns: new[] { "challan_no", "store_code", "delivery_to", "barcode", "cpu", "del_qty", "rcv_qty", "receive_date", "sal_barcode", "sal_price", "status" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "rcv_qty", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "StoreDml",
     targetTable: "store_dml",
     sourceDateColumn: "DML_DATE",
-    targetDateColumn: "dml_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT STORE_CODE, REF_NO, DML_DATE, BARCODE, DML_QTY, SAL_BARCODE, SAL_PRICE, CPU, STATUS " +
+        $"SELECT REF_NO, DML_DATE, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DML_QTY, STATUS " +
         $"FROM STORE_DML WHERE DML_DATE >= @cutoff",
-    targetColumns: new[] { "store_code", "ref_no", "dml_date", "barcode", "dml_qty", "sal_barcode", "sal_price", "cpu", "status" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "dml_qty", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "PurchaseReturnDetails",
     targetTable: "purchase_return_details",
     sourceDateColumn: "RTN_DT",
-    targetDateColumn: "rtn_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, CPU, RTN_QTY, SAL_BARCODE, STATUS " +
+        $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, RTN_QTY, STATUS " +
         $"FROM PURCHASE_RETURN_DETAILS WHERE RTN_DT >= @cutoff",
-    targetColumns: new[] { "challan_no", "rtn_date", "store_code", "barcode", "cpu", "rtn_qty", "sal_barcode", "status" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Text });
+    targetColumns: new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "rtn_qty", "status" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
 
 await runner.SyncIncrementalAsync(
     syncKey: "InvTrackingSummary",
     targetTable: "inv_tracking_summary",
     sourceDateColumn: "ScanStartDate",
-    targetDateColumn: "adj_date",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT STORE_CODE, Barcode, sBarcode, AdjQty, SessionId, MRP, CPU, CAST(ScanStartDate AS DATE) AS AdjDate " +
+        $"SELECT SessionId, CAST(ScanStartDate AS DATE) AS ScanStartDate, STORE_CODE, Barcode, sBarcode, CPU, MRP, AdjQty " +
         $"FROM InvTrackingSummary WHERE ScanStartDate >= @cutoff",
-    targetColumns: new[] { "store_code", "barcode", "sbarcode", "adj_qty", "session_id", "mrp", "cpu", "adj_date" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Date });
+    targetColumns: new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "adj_qty" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
 
 await runner.SyncIncrementalAsync(
     syncKey: "Sale",
     targetTable: "sale",
     sourceDateColumn: "INVOICE_DT",
-    targetDateColumn: "invoice_dt",
+    targetDateColumn: "txn_date",
     buildSourceSql: cutoff =>
-        $"SELECT INVOICE_NO, INVOICE_DT, BARCODE, SAL_BARCODE, CPU, MRP, SQTY, RQTY, STORE_CODE " +
+        $"SELECT INVOICE_NO, INVOICE_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, MRP, SQTY, RQTY " +
         $"FROM SALE WHERE INVOICE_DT >= @cutoff",
-    targetColumns: new[] { "invoice_no", "invoice_dt", "barcode", "sal_barcode", "cpu", "mrp", "sqty", "rqty", "store_code" },
-    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
+    targetColumns: new[] { "invoice_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "sale_qty", "rtn_qty" },
+    targetTypes: new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
 
 Console.WriteLine($"=== Inventory sync finished: {DateTime.Now} ===");
 
 
 // ============================================================================
-// SYNC RUNNER — the actual logic, kept in one place so each table above is
-// just a short declaration of "what to pull and where it goes".
+// SYNC RUNNER — unchanged logic from before: master tables get a full
+// wipe-and-reload, transactional tables get an incremental delete-and-
+// reinsert from the last synced date forward, everything loads via
+// Postgres's fast COPY protocol with explicit column types.
 // ============================================================================
 class SyncRunner
 {
@@ -198,7 +155,6 @@ class SyncRunner
         _target = target;
     }
 
-    /// <summary>Full refresh of a small master table: wipe it, reload it.</summary>
     public async Task RefreshMasterTableAsync(string sourceSql, string targetTable, string[] targetColumns, NpgsqlDbType[] targetTypes)
     {
         Console.WriteLine($"--- Refreshing master table: {targetTable} ---");
@@ -231,11 +187,6 @@ class SyncRunner
         }
     }
 
-    /// <summary>
-    /// Incremental sync: re-pull everything from (last synced date) onward,
-    /// delete that same window in the target, then re-insert. Safe to re-run
-    /// and correctly picks up late-arriving same-day rows.
-    /// </summary>
     public async Task SyncIncrementalAsync(
         string syncKey,
         string targetTable,
@@ -307,12 +258,6 @@ class SyncRunner
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /// <summary>
-    /// Fast bulk load using Postgres's native COPY protocol — this is what makes
-    /// millions of rows load in seconds/minutes instead of hours. Each column's
-    /// exact type is specified explicitly (rather than letting Npgsql guess from
-    /// the .NET value) because guessing gets date columns wrong.
-    /// </summary>
     private async Task BulkInsertAsync(string table, string[] columns, NpgsqlDbType[] types, List<object?[]> rows)
     {
         if (rows.Count == 0) return;
