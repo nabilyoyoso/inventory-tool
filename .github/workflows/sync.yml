@@ -21,7 +21,6 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Run the sync job
-        working-directory: ./InventorySync
         env:
           ERP_CONNECTION_STRING: ${{ secrets.ERP_CONNECTION_STRING }}
           SUPABASE_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
