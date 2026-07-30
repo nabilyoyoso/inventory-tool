@@ -1,8 +1,11 @@
 name: Inventory Sync
 
+# Runs automatically every day, and can also be triggered manually from the
+# "Actions" tab in your GitHub repo (a green "Run workflow" button) whenever
+# you want to test it without waiting for the schedule.
 on:
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '*/30 * * * *'   # every 30 minutes
   workflow_dispatch:
 
 jobs:
@@ -11,11 +14,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
       - name: Run the sync job
+        working-directory: ./InventorySync
         env:
           ERP_CONNECTION_STRING: ${{ secrets.ERP_CONNECTION_STRING }}
           SUPABASE_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
