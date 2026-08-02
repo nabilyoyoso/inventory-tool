@@ -1,140 +1,96 @@
 // ============================================================================
-// INVENTORY SYNC SERVICE — web-triggered version
+// INVENTORY SYNC SERVICE — v3: all-or-nothing atomic sync
 // ============================================================================
-// Same sync logic as before, but now it's a small web service instead of a
-// script that runs once and exits. It sits idle until something sends it an
-// HTTP request to /sync, then runs the full sync and returns a text log —
-// exactly like the console output you've seen before, just delivered as a
-// web response instead of printed to a terminal.
+// How this version works, in plain terms:
+//   PHASE 1 — STAGE: every one of the 10 tables loads its fresh data into a
+//   throwaway "_staging" copy. The real tables are never touched during this
+//   phase. Each table gets up to 3 retry attempts on its own fresh
+//   connection if something hiccups.
 //
-// A SYNC_SECRET_KEY environment variable protects it from strangers finding
-// the URL and triggering syncs — every request must include the matching
-// ?key= value or it's rejected.
+//   PHASE 2 — CHECK: if ANY table failed to stage after its retries, the
+//   whole sync stops here. Nothing gets swapped in. Every real table is
+//   left exactly as it was after the last successful sync — stale, but
+//   never inconsistent or half-updated.
+//
+//   PHASE 3 — SWAP: only if all 10 staged successfully, every table is
+//   swapped into place inside a single database transaction — either all
+//   ten changes commit together, or (if something goes wrong at this very
+//   last step) none of them do. There is no possible in-between state.
+//
+// "Automatic retry" here means: this whole process re-runs cleanly from
+// scratch every time it's triggered — either by the 15-minute schedule or
+// the manual Refresh button — so a failed attempt simply gets tried again
+// in full on the next trigger, with no partial state left behind to worry
+// about in between.
+//
+// AUTH: two ways to trigger a sync —
+//   1. ?key=... query string (used by the automated 15-minute scheduler)
+//   2. Authorization: Bearer <token> header, where <token> is a real logged
+//      -in user's Supabase session token (used by the report page's
+//      "Refresh" button — no shared secret needs to live in the public
+//      front-end code this way).
 // ============================================================================
 
 using Microsoft.Data.SqlClient;
 using Npgsql;
 using NpgsqlTypes;
 using System.Text;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
-
-// Render tells the app which port to listen on via the PORT environment variable.
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
-
 var app = builder.Build();
 
-// Simple health check — lets you confirm the service is alive by just visiting the root URL.
-app.MapGet("/", () => "Inventory Sync Service is running. Trigger a sync at /sync?key=YOUR_SECRET");
+var httpClient = new HttpClient();
 
-// Prevents two syncs from ever running at the same time (e.g. a page reload
-// while one is still in progress) — that collision was corrupting data.
+app.MapGet("/", () => "Inventory Sync Service is running.");
+
 var syncLock = new SemaphoreSlim(1, 1);
 
 app.MapGet("/sync", async (HttpContext ctx) =>
 {
-    var expectedKey = Environment.GetEnvironmentVariable("SYNC_SECRET_KEY");
-    var providedKey = ctx.Request.Query["key"].ToString();
-
-    if (string.IsNullOrEmpty(expectedKey) || providedKey != expectedKey)
+    bool authorized = await IsAuthorizedAsync(ctx, httpClient);
+    if (!authorized)
     {
         ctx.Response.StatusCode = 401;
-        await ctx.Response.WriteAsync("Unauthorized: missing or incorrect key.");
+        await ctx.Response.WriteAsync("Unauthorized.");
         return;
     }
 
     if (!await syncLock.WaitAsync(0))
     {
         ctx.Response.StatusCode = 409;
-        await ctx.Response.WriteAsync("A sync is already running. Skipping this trigger — try again in a bit.");
+        await ctx.Response.WriteAsync("A sync is already running. Try again shortly.");
         return;
     }
 
     try
     {
-    var log = new StringBuilder();
-    void Log(string msg)
-    {
-        log.AppendLine(msg);
-        Console.WriteLine(msg); // also visible in Render's own logs
-    }
+        var log = new StringBuilder();
+        void Log(string msg) { log.AppendLine(msg); Console.WriteLine(msg); }
 
-    string? sourceConnStr = Environment.GetEnvironmentVariable("ERP_CONNECTION_STRING");
-    string? supabaseConnStr = Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
+        string? sourceConnStr = Environment.GetEnvironmentVariable("ERP_CONNECTION_STRING");
+        string? supabaseConnStr = Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
 
-    if (string.IsNullOrEmpty(sourceConnStr) || string.IsNullOrEmpty(supabaseConnStr))
-    {
-        await ctx.Response.WriteAsync("!! Missing ERP_CONNECTION_STRING or SUPABASE_CONNECTION_STRING environment variables.");
-        return;
-    }
-    Log($"=== Inventory sync started: {DateTime.Now} ===");
+        if (string.IsNullOrEmpty(sourceConnStr) || string.IsNullOrEmpty(supabaseConnStr))
+        {
+            await ctx.Response.WriteAsync("!! Missing ERP_CONNECTION_STRING or SUPABASE_CONNECTION_STRING.");
+            return;
+        }
 
-    using var source = new SqlConnection(sourceConnStr);
-    using var target = new NpgsqlConnection(supabaseConnStr);
+        Log($"=== Inventory sync started: {DateTime.Now} ===");
 
-    try { await source.OpenAsync(); Log("Connected to production ERP (read-only)."); }
-    catch (Exception ex) { Log("!! Could not connect to the ERP database: " + ex.Message); await ctx.Response.WriteAsync(log.ToString()); return; }
+        var runner = new SyncRunner(sourceConnStr, supabaseConnStr, Log);
+        bool success = await runner.RunFullSyncAsync(BuildTableSpecs());
 
-    try { await target.OpenAsync(); Log("Connected to Supabase."); }
-    catch (Exception ex) { Log("!! Could not connect to Supabase: " + ex.Message); await ctx.Response.WriteAsync(log.ToString()); return; }
+        Log(success
+            ? $"=== SYNC SUCCESSFUL — all tables updated together: {DateTime.Now} ==="
+            : $"=== SYNC FAILED — no changes were applied, all data unchanged: {DateTime.Now} ===");
 
-    var runner = new SyncRunner(source, target, Log);
-
-    await runner.RefreshMasterTableAsync(
-        "SELECT STORE_CODE, STORE_NAME FROM STORE",
-        "store", new[] { "store_code", "store_name" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Text });
-
-    await runner.RefreshMasterTableAsync(
-        "SELECT BARCODE, USER_BARCODE, category_name, sub_category_name, NAME FROM PRODUCT_FILE",
-        "product_file", new[] { "barcode", "user_barcode", "category", "sub_category", "item_name" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text });
-
-    await runner.RefreshMasterTableAsync(
-        "SELECT MAX(BARCODE) AS BARCODE, SAL_BARCODE, MAX(SAL_CPU) AS SAL_CPU, MAX(SAL_PRICE) AS SAL_PRICE FROM PRODUCT_STOCK GROUP BY SAL_BARCODE",
-        "product_stock", new[] { "barcode", "sal_barcode", "cpu", "mrp" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
-
-    await runner.SyncIncrementalAsync("PurchaseRcvDetails", "purchase_rcv_details", "PURCHASE_DATE", "txn_date",
-        cutoff => $"SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, SAL_BARCODE, PUR_PRICE, SAL_PRICE, PUR_QTY, STATUS FROM PURCHASE_RCV_DETAILS WHERE PURCHASE_DATE >= @cutoff",
-        new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "pur_qty", "status" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
-
-    await runner.SyncIncrementalAsync("StoreDeliveryDetails", "store_delivery_details", "DELIVERY_DATE", "txn_date",
-        cutoff => $"SELECT CHALLAN_NO, DELIVERY_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, STATUS FROM STORE_DELIVERY_DETAILS WHERE DELIVERY_DATE >= @cutoff",
-        new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "status" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
-
-    await runner.SyncIncrementalAsync("StoreDeliveryReceive", "store_delivery_receive", "RECEIVE_DATE", "txn_date",
-        cutoff => $"SELECT CHALLAN_NO, RECEIVE_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, RCV_QTY, STATUS FROM STOREDELIVERYRECEIVE WHERE RECEIVE_DATE >= @cutoff",
-        new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "rcv_qty", "status" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
-
-    await runner.SyncIncrementalAsync("StoreDml", "store_dml", "DML_DATE", "txn_date",
-        cutoff => $"SELECT REF_NO, DML_DATE, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DML_QTY, STATUS FROM STORE_DML WHERE DML_DATE >= @cutoff",
-        new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "dml_qty", "status" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
-
-    await runner.SyncIncrementalAsync("PurchaseReturnDetails", "purchase_return_details", "RTN_DT", "txn_date",
-        cutoff => $"SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, RTN_QTY, STATUS FROM PURCHASE_RETURN_DETAILS WHERE RTN_DT >= @cutoff",
-        new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "rtn_qty", "status" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text });
-
-    await runner.SyncIncrementalAsync("InvTrackingSummary", "inv_tracking_summary", "ScanStartDate", "txn_date",
-        cutoff => $"SELECT SessionId, CAST(ScanStartDate AS DATE) AS ScanStartDate, STORE_CODE, Barcode, sBarcode, CPU, MRP, AdjQty FROM InvTrackingSummary WHERE ScanStartDate >= @cutoff",
-        new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "adj_qty" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
-
-    await runner.SyncIncrementalAsync("Sale", "sale", "INVOICE_DT", "txn_date",
-        cutoff => $"SELECT INVOICE_NO, INVOICE_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, MRP, SQTY, RQTY FROM SALE WHERE INVOICE_DT >= @cutoff",
-        new[] { "invoice_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "sale_qty", "rtn_qty" },
-        new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric });
-
-    Log($"=== Inventory sync finished: {DateTime.Now} ===");
-
-    ctx.Response.ContentType = "text/plain";
-    await ctx.Response.WriteAsync(log.ToString());
+        ctx.Response.ContentType = "text/plain";
+        ctx.Response.StatusCode = success ? 200 : 500;
+        await ctx.Response.WriteAsync(log.ToString());
     }
     finally
     {
@@ -146,116 +102,280 @@ app.Run();
 
 
 // ============================================================================
-// SYNC RUNNER — identical logic to the console version (master table refresh,
-// incremental sync with delete-and-reinsert, retry on failure, fast bulk
-// COPY loading) — just takes a logging function instead of writing straight
-// to the console, so its output can be captured into the HTTP response too.
+// AUTH — accepts either the shared secret key (for the scheduler) or a real
+// logged-in user's Supabase session token (for the Refresh button).
+// ============================================================================
+static async Task<bool> IsAuthorizedAsync(HttpContext ctx, HttpClient httpClient)
+{
+    var expectedKey = Environment.GetEnvironmentVariable("SYNC_SECRET_KEY");
+    var providedKey = ctx.Request.Query["key"].ToString();
+    if (!string.IsNullOrEmpty(expectedKey) && providedKey == expectedKey) return true;
+
+    var authHeader = ctx.Request.Headers.Authorization.ToString();
+    if (authHeader.StartsWith("Bearer "))
+    {
+        var token = authHeader["Bearer ".Length..];
+        var supabaseUrl = Environment.GetEnvironmentVariable("SUPABASE_URL");
+        var anonKey = Environment.GetEnvironmentVariable("SUPABASE_ANON_KEY");
+        if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(anonKey)) return false;
+
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"{supabaseUrl}/auth/v1/user");
+            req.Headers.Add("apikey", anonKey);
+            req.Headers.Add("Authorization", $"Bearer {token}");
+            var resp = await httpClient.SendAsync(req);
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    return false;
+}
+
+
+// ============================================================================
+// TABLE SPECIFICATIONS — declarative list of all 10 tables, used to drive
+// both the staging phase and the swap phase.
+// ============================================================================
+static List<TableSpec> BuildTableSpecs() => new()
+{
+    new TableSpec
+    {
+        TargetTable = "store", IsMaster = true,
+        Columns = new[] { "store_code", "store_name" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Text },
+        StaticSql = "SELECT STORE_CODE, STORE_NAME FROM STORE",
+    },
+    new TableSpec
+    {
+        TargetTable = "product_file", IsMaster = true,
+        Columns = new[] { "barcode", "user_barcode", "category", "sub_category", "item_name" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text },
+        StaticSql = "SELECT BARCODE, USER_BARCODE, category_name, sub_category_name, NAME FROM PRODUCT_FILE",
+    },
+    new TableSpec
+    {
+        TargetTable = "product_stock", IsMaster = true,
+        Columns = new[] { "barcode", "sal_barcode", "cpu", "mrp" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric },
+        StaticSql = "SELECT MAX(BARCODE) AS BARCODE, SAL_BARCODE, MAX(SAL_CPU) AS SAL_CPU, MAX(SAL_PRICE) AS SAL_PRICE FROM PRODUCT_STOCK GROUP BY SAL_BARCODE",
+    },
+    new TableSpec
+    {
+        TargetTable = "purchase_rcv_details", SyncKey = "PurchaseRcvDetails", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "pur_qty", "status" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text },
+        BuildSql = () => "SELECT MEMO_NO, PURCHASE_DATE, STORE_CODE, BARCODE, SAL_BARCODE, PUR_PRICE, SAL_PRICE, PUR_QTY, STATUS FROM PURCHASE_RCV_DETAILS WHERE PURCHASE_DATE >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "store_delivery_details", SyncKey = "StoreDeliveryDetails", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "status" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text },
+        BuildSql = () => "SELECT CHALLAN_NO, DELIVERY_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, STATUS FROM STORE_DELIVERY_DETAILS WHERE DELIVERY_DATE >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "store_delivery_receive", SyncKey = "StoreDeliveryReceive", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "delivery_from", "delivery_to", "barcode", "sal_barcode", "cpu", "mrp", "del_qty", "rcv_qty", "status" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text },
+        BuildSql = () => "SELECT CHALLAN_NO, RECEIVE_DATE, STORE_CODE, DELIVERY_TO, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DEL_QTY, RCV_QTY, STATUS FROM STOREDELIVERYRECEIVE WHERE RECEIVE_DATE >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "store_dml", SyncKey = "StoreDml", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "dml_qty", "status" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text },
+        BuildSql = () => "SELECT REF_NO, DML_DATE, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, DML_QTY, STATUS FROM STORE_DML WHERE DML_DATE >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "purchase_return_details", SyncKey = "PurchaseReturnDetails", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "rtn_qty", "status" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Text },
+        BuildSql = () => "SELECT CHALLAN_NO, RTN_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, SAL_PRICE, RTN_QTY, STATUS FROM PURCHASE_RETURN_DETAILS WHERE RTN_DT >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "inv_tracking_summary", SyncKey = "InvTrackingSummary", TargetDateColumn = "txn_date",
+        Columns = new[] { "challan_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "adj_qty" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric },
+        BuildSql = () => "SELECT SessionId, CAST(ScanStartDate AS DATE) AS ScanStartDate, STORE_CODE, Barcode, sBarcode, CPU, MRP, AdjQty FROM InvTrackingSummary WHERE ScanStartDate >= @cutoff",
+    },
+    new TableSpec
+    {
+        TargetTable = "sale", SyncKey = "Sale", TargetDateColumn = "txn_date",
+        Columns = new[] { "invoice_no", "txn_date", "store_code", "barcode", "sal_barcode", "cpu", "mrp", "sale_qty", "rtn_qty" },
+        Types = new[] { NpgsqlDbType.Text, NpgsqlDbType.Date, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Text, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric, NpgsqlDbType.Numeric },
+        BuildSql = () => "SELECT INVOICE_NO, INVOICE_DT, STORE_CODE, BARCODE, SAL_BARCODE, CPU, MRP, SQTY, RQTY FROM SALE WHERE INVOICE_DT >= @cutoff",
+    },
+};
+
+class TableSpec
+{
+    public string TargetTable = "";
+    public bool IsMaster = false;
+    public string[] Columns = Array.Empty<string>();
+    public NpgsqlDbType[] Types = Array.Empty<NpgsqlDbType>();
+    public string? StaticSql;                    // master tables: fixed query, no cutoff
+    public Func<string>? BuildSql;                 // incremental tables: query needing @cutoff
+    public string? SyncKey;                       // incremental tables: sync_log row key
+    public string? TargetDateColumn;               // incremental tables: date column name
+    public string StagingTable => $"{TargetTable}_staging";
+}
+
+
+// ============================================================================
+// SYNC RUNNER — stage everything, then swap everything atomically.
 // ============================================================================
 class SyncRunner
 {
-    private readonly SqlConnection _source;
-    private readonly NpgsqlConnection _target;
+    private readonly string _sourceConnStr;
+    private readonly string _targetConnStr;
     private readonly Action<string> _log;
 
-    public SyncRunner(SqlConnection source, NpgsqlConnection target, Action<string> log)
+    public SyncRunner(string sourceConnStr, string targetConnStr, Action<string> log)
     {
-        _source = source;
-        _target = target;
+        _sourceConnStr = sourceConnStr;
+        _targetConnStr = targetConnStr;
         _log = log;
     }
 
-    public async Task RefreshMasterTableAsync(string sourceSql, string targetTable, string[] targetColumns, NpgsqlDbType[] targetTypes)
+    public async Task<bool> RunFullSyncAsync(List<TableSpec> specs)
     {
-        const int maxAttempts = 3;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        // ---------- PHASE 1: STAGE ----------
+        var stagedRowCounts = new Dictionary<string, int>();
+        var stagedCutoffs = new Dictionary<string, DateTime>();
+        bool allStaged = true;
+
+        foreach (var spec in specs)
         {
-            _log(attempt == 1 ? $"--- Refreshing master table: {targetTable} ---" : $"--- Retrying master table: {targetTable} (attempt {attempt}/{maxAttempts}) ---");
-            try
-            {
-                using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
-                    await truncate.ExecuteNonQueryAsync();
+            const int maxAttempts = 3;
+            bool tableOk = false;
 
-                int rowCount = await StreamCopyAsync(sourceSql, null, targetTable, targetColumns, targetTypes);
-                _log($"    {targetTable}: {rowCount} rows loaded.");
-                return;
-            }
-            catch (Exception ex)
+            for (int attempt = 1; attempt <= maxAttempts && !tableOk; attempt++)
             {
-                if (attempt == maxAttempts) { _log($"    !! Failed syncing {targetTable} after {maxAttempts} attempts: {ex.Message}"); }
-                else { _log($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry..."); await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); }
-            }
-        }
-    }
-
-    public async Task SyncIncrementalAsync(string syncKey, string targetTable, string sourceDateColumn, string targetDateColumn,
-        Func<string, string> buildSourceSql, string[] targetColumns, NpgsqlDbType[] targetTypes)
-    {
-        const int maxAttempts = 3;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            _log(attempt == 1 ? $"--- Syncing: {targetTable} ---" : $"--- Retrying: {targetTable} (attempt {attempt}/{maxAttempts}) ---");
-            try
-            {
-                DateTime cutoff = await GetLastSyncedDateAsync(syncKey) ?? new DateTime(2000, 1, 1);
-                string sql = buildSourceSql(sourceDateColumn);
-
-                using (var del = new NpgsqlCommand($"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target))
+                _log(attempt == 1 ? $"--- Staging: {spec.TargetTable} ---" : $"--- Retrying stage: {spec.TargetTable} (attempt {attempt}/{maxAttempts}) ---");
+                try
                 {
-                    del.Parameters.AddWithValue("cutoff", cutoff.Date);
-                    await del.ExecuteNonQueryAsync();
+                    DateTime cutoff = spec.IsMaster ? DateTime.MinValue : (await GetLastSyncedDateAsync(spec.SyncKey!) ?? new DateTime(2000, 1, 1));
+                    string sql = spec.IsMaster ? spec.StaticSql! : spec.BuildSql!();
+
+                    using (var target = new NpgsqlConnection(_targetConnStr))
+                    {
+                        await target.OpenAsync();
+                        using var create = new NpgsqlCommand($"CREATE TABLE IF NOT EXISTS {spec.StagingTable} (LIKE {spec.TargetTable} INCLUDING ALL)", target);
+                        await create.ExecuteNonQueryAsync();
+                        using var truncate = new NpgsqlCommand($"TRUNCATE TABLE {spec.StagingTable}", target);
+                        await truncate.ExecuteNonQueryAsync();
+                    }
+
+                    int rowCount = await StreamCopyAsync(sql, spec.IsMaster ? null : cutoff, spec.StagingTable, spec.Columns, spec.Types);
+
+                    stagedRowCounts[spec.TargetTable] = rowCount;
+                    if (!spec.IsMaster) stagedCutoffs[spec.TargetTable] = cutoff;
+
+                    _log($"    {spec.TargetTable}: {rowCount} rows staged.");
+                    tableOk = true;
                 }
-
-                int rowCount = await StreamCopyAsync(sql, cutoff, targetTable, targetColumns, targetTypes);
-
-                DateTime newCutoff = rowCount > 0 ? DateTime.Now.Date : cutoff;
-                await UpdateSyncLogAsync(syncKey, newCutoff, rowCount);
-
-                _log($"    {targetTable}: {rowCount} rows synced (from {cutoff:yyyy-MM-dd} onward).");
-                return;
+                catch (Exception ex)
+                {
+                    if (attempt == maxAttempts) _log($"    !! Staging failed for {spec.TargetTable} after {maxAttempts} attempts: {ex.Message}");
+                    else { _log($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry..."); await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); }
+                }
             }
-            catch (Exception ex)
+
+            if (!tableOk) allStaged = false;
+        }
+
+        // ---------- PHASE 2: CHECK ----------
+        if (!allStaged)
+        {
+            _log("!! One or more tables failed to stage. Aborting — no changes applied to any table.");
+            return false;
+        }
+
+        // ---------- PHASE 3: SWAP (all-or-nothing) ----------
+        _log("--- All tables staged successfully. Applying changes atomically... ---");
+        try
+        {
+            using var target = new NpgsqlConnection(_targetConnStr);
+            await target.OpenAsync();
+            using var tx = await target.BeginTransactionAsync();
+
+            foreach (var spec in specs)
             {
-                if (attempt == maxAttempts) { _log($"    !! Failed syncing {targetTable} after {maxAttempts} attempts: {ex.Message}"); }
-                else { _log($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry..."); await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); }
+                if (spec.IsMaster)
+                {
+                    using var swap = new NpgsqlCommand(
+                        $"DROP TABLE IF EXISTS {spec.TargetTable}_old; " +
+                        $"ALTER TABLE {spec.TargetTable} RENAME TO {spec.TargetTable}_old; " +
+                        $"ALTER TABLE {spec.StagingTable} RENAME TO {spec.TargetTable}; " +
+                        $"ALTER TABLE {spec.TargetTable}_old RENAME TO {spec.StagingTable}; " +
+                        $"TRUNCATE TABLE {spec.StagingTable};",
+                        target, (NpgsqlTransaction)tx);
+                    await swap.ExecuteNonQueryAsync();
+                }
+                else
+                {
+                    var cutoff = stagedCutoffs[spec.TargetTable];
+                    using (var del = new NpgsqlCommand($"DELETE FROM {spec.TargetTable} WHERE {spec.TargetDateColumn} >= @cutoff", target, (NpgsqlTransaction)tx))
+                    {
+                        del.Parameters.AddWithValue("cutoff", cutoff.Date);
+                        await del.ExecuteNonQueryAsync();
+                    }
+                    using (var ins = new NpgsqlCommand($"INSERT INTO {spec.TargetTable} SELECT * FROM {spec.StagingTable}", target, (NpgsqlTransaction)tx))
+                        await ins.ExecuteNonQueryAsync();
+                    using (var truncStaging = new NpgsqlCommand($"TRUNCATE TABLE {spec.StagingTable}", target, (NpgsqlTransaction)tx))
+                        await truncStaging.ExecuteNonQueryAsync();
+
+                    DateTime newCutoff = stagedRowCounts[spec.TargetTable] > 0 ? DateTime.Now.Date : cutoff;
+                    using var updLog = new NpgsqlCommand(
+                        "UPDATE sync_log SET last_synced_date = @d, last_synced_at = now(), rows_synced = @r WHERE table_name = @key",
+                        target, (NpgsqlTransaction)tx);
+                    updLog.Parameters.AddWithValue("d", newCutoff);
+                    updLog.Parameters.AddWithValue("r", stagedRowCounts[spec.TargetTable]);
+                    updLog.Parameters.AddWithValue("key", spec.SyncKey!);
+                    await updLog.ExecuteNonQueryAsync();
+                }
             }
+
+            await tx.CommitAsync();
+            foreach (var spec in specs) _log($"    {spec.TargetTable}: {stagedRowCounts[spec.TargetTable]} rows applied.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log($"!! Final swap failed: {ex.Message}. The database automatically rolled back — no partial changes were applied.");
+            return false;
         }
     }
 
     private async Task<DateTime?> GetLastSyncedDateAsync(string syncKey)
     {
-        using var cmd = new NpgsqlCommand("SELECT last_synced_date FROM sync_log WHERE table_name = @key", _target);
+        using var target = new NpgsqlConnection(_targetConnStr);
+        await target.OpenAsync();
+        using var cmd = new NpgsqlCommand("SELECT last_synced_date FROM sync_log WHERE table_name = @key", target);
         cmd.Parameters.AddWithValue("key", syncKey);
         var result = await cmd.ExecuteScalarAsync();
         return (result == null || result is DBNull) ? null : (DateTime)result;
     }
 
-    private async Task UpdateSyncLogAsync(string syncKey, DateTime syncedThrough, int rowCount)
-    {
-        using var cmd = new NpgsqlCommand("UPDATE sync_log SET last_synced_date = @d, last_synced_at = now(), rows_synced = @r WHERE table_name = @key", _target);
-        cmd.Parameters.AddWithValue("d", syncedThrough);
-        cmd.Parameters.AddWithValue("r", rowCount);
-        cmd.Parameters.AddWithValue("key", syncKey);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    /// <summary>
-    /// Streams rows directly from the ERP query into Supabase, one row at a
-    /// time, using Postgres's fast COPY protocol. This is what keeps memory
-    /// usage flat regardless of table size — a 600,000-row table costs the
-    /// same memory as a 10-row table, since only one row ever exists in
-    /// memory at once. (The previous version loaded the entire table into a
-    /// list first, which is what caused an out-of-memory crash on Render's
-    /// small free instance for the largest table.)
-    /// </summary>
     private async Task<int> StreamCopyAsync(string sourceSql, DateTime? cutoffParam, string targetTable, string[] columns, NpgsqlDbType[] types)
     {
-        using var cmd = new SqlCommand(sourceSql, _source);
+        using var source = new SqlConnection(_sourceConnStr);
+        await source.OpenAsync();
+        using var target = new NpgsqlConnection(_targetConnStr);
+        await target.OpenAsync();
+
+        using var cmd = new SqlCommand(sourceSql, source);
         if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
 
         using var reader = await cmd.ExecuteReaderAsync();
 
         string colList = string.Join(", ", columns);
-        await using var writer = await _target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
+        await using var writer = await target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
 
         int count = 0;
         var row = new object?[columns.Length];
