@@ -28,6 +28,10 @@ var app = builder.Build();
 // Simple health check — lets you confirm the service is alive by just visiting the root URL.
 app.MapGet("/", () => "Inventory Sync Service is running. Trigger a sync at /sync?key=YOUR_SECRET");
 
+// Prevents two syncs from ever running at the same time (e.g. a page reload
+// while one is still in progress) — that collision was corrupting data.
+var syncLock = new SemaphoreSlim(1, 1);
+
 app.MapGet("/sync", async (HttpContext ctx) =>
 {
     var expectedKey = Environment.GetEnvironmentVariable("SYNC_SECRET_KEY");
@@ -40,6 +44,15 @@ app.MapGet("/sync", async (HttpContext ctx) =>
         return;
     }
 
+    if (!await syncLock.WaitAsync(0))
+    {
+        ctx.Response.StatusCode = 409;
+        await ctx.Response.WriteAsync("A sync is already running. Skipping this trigger — try again in a bit.");
+        return;
+    }
+
+    try
+    {
     var log = new StringBuilder();
     void Log(string msg)
     {
@@ -55,7 +68,6 @@ app.MapGet("/sync", async (HttpContext ctx) =>
         await ctx.Response.WriteAsync("!! Missing ERP_CONNECTION_STRING or SUPABASE_CONNECTION_STRING environment variables.");
         return;
     }
-
     Log($"=== Inventory sync started: {DateTime.Now} ===");
 
     using var source = new SqlConnection(sourceConnStr);
@@ -123,6 +135,11 @@ app.MapGet("/sync", async (HttpContext ctx) =>
 
     ctx.Response.ContentType = "text/plain";
     await ctx.Response.WriteAsync(log.ToString());
+    }
+    finally
+    {
+        syncLock.Release();
+    }
 });
 
 app.Run();
@@ -155,24 +172,11 @@ class SyncRunner
             _log(attempt == 1 ? $"--- Refreshing master table: {targetTable} ---" : $"--- Retrying master table: {targetTable} (attempt {attempt}/{maxAttempts}) ---");
             try
             {
-                var rows = new List<object?[]>();
-                using (var cmd = new SqlCommand(sourceSql, _source))
-                using (var reader = await cmd.ExecuteReaderAsync())
-                {
-                    while (await reader.ReadAsync())
-                    {
-                        var row = new object?[reader.FieldCount];
-                        reader.GetValues(row!);
-                        for (int i = 0; i < row.Length; i++) if (row[i] is DBNull) row[i] = null;
-                        rows.Add(row);
-                    }
-                }
-
                 using (var truncate = new NpgsqlCommand($"TRUNCATE TABLE {targetTable}", _target))
                     await truncate.ExecuteNonQueryAsync();
 
-                await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
-                _log($"    {targetTable}: {rows.Count} rows loaded.");
+                int rowCount = await StreamCopyAsync(sourceSql, null, targetTable, targetColumns, targetTypes);
+                _log($"    {targetTable}: {rowCount} rows loaded.");
                 return;
             }
             catch (Exception ex)
@@ -193,21 +197,7 @@ class SyncRunner
             try
             {
                 DateTime cutoff = await GetLastSyncedDateAsync(syncKey) ?? new DateTime(2000, 1, 1);
-
-                var rows = new List<object?[]>();
                 string sql = buildSourceSql(sourceDateColumn);
-                using (var cmd = new SqlCommand(sql, _source))
-                {
-                    cmd.Parameters.AddWithValue("@cutoff", cutoff);
-                    using var reader = await cmd.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        var row = new object?[reader.FieldCount];
-                        reader.GetValues(row!);
-                        for (int i = 0; i < row.Length; i++) if (row[i] is DBNull) row[i] = null;
-                        rows.Add(row);
-                    }
-                }
 
                 using (var del = new NpgsqlCommand($"DELETE FROM {targetTable} WHERE {targetDateColumn} >= @cutoff", _target))
                 {
@@ -215,12 +205,12 @@ class SyncRunner
                     await del.ExecuteNonQueryAsync();
                 }
 
-                await BulkInsertAsync(targetTable, targetColumns, targetTypes, rows);
+                int rowCount = await StreamCopyAsync(sql, cutoff, targetTable, targetColumns, targetTypes);
 
-                DateTime newCutoff = rows.Count > 0 ? DateTime.Now.Date : cutoff;
-                await UpdateSyncLogAsync(syncKey, newCutoff, rows.Count);
+                DateTime newCutoff = rowCount > 0 ? DateTime.Now.Date : cutoff;
+                await UpdateSyncLogAsync(syncKey, newCutoff, rowCount);
 
-                _log($"    {targetTable}: {rows.Count} rows synced (from {cutoff:yyyy-MM-dd} onward).");
+                _log($"    {targetTable}: {rowCount} rows synced (from {cutoff:yyyy-MM-dd} onward).");
                 return;
             }
             catch (Exception ex)
@@ -248,22 +238,42 @@ class SyncRunner
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task BulkInsertAsync(string table, string[] columns, NpgsqlDbType[] types, List<object?[]> rows)
+    /// <summary>
+    /// Streams rows directly from the ERP query into Supabase, one row at a
+    /// time, using Postgres's fast COPY protocol. This is what keeps memory
+    /// usage flat regardless of table size — a 600,000-row table costs the
+    /// same memory as a 10-row table, since only one row ever exists in
+    /// memory at once. (The previous version loaded the entire table into a
+    /// list first, which is what caused an out-of-memory crash on Render's
+    /// small free instance for the largest table.)
+    /// </summary>
+    private async Task<int> StreamCopyAsync(string sourceSql, DateTime? cutoffParam, string targetTable, string[] columns, NpgsqlDbType[] types)
     {
-        if (rows.Count == 0) return;
+        using var cmd = new SqlCommand(sourceSql, _source);
+        if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
+
+        using var reader = await cmd.ExecuteReaderAsync();
+
         string colList = string.Join(", ", columns);
-        await using var writer = await _target.BeginBinaryImportAsync($"COPY {table} ({colList}) FROM STDIN (FORMAT BINARY)");
-        foreach (var row in rows)
+        await using var writer = await _target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
+
+        int count = 0;
+        var row = new object?[columns.Length];
+        while (await reader.ReadAsync())
         {
+            reader.GetValues(row!);
             await writer.StartRowAsync();
             for (int i = 0; i < row.Length; i++)
             {
-                var val = row[i];
+                var val = row[i] is DBNull ? null : row[i];
                 if (val == null) await writer.WriteNullAsync();
                 else if (types[i] == NpgsqlDbType.Date && val is DateTime dt) await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
                 else await writer.WriteAsync(val, types[i]);
             }
+            count++;
         }
+
         await writer.CompleteAsync();
+        return count;
     }
 }
