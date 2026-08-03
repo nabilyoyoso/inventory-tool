@@ -406,6 +406,7 @@ class SyncRunner
         try
         {
             using var cmd = new SqlCommand(sourceSql, source);
+            cmd.CommandTimeout = 300; // 5 minutes — the default of 30 seconds is too short for large tables over this connection
             if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
 
             using var reader = await cmd.ExecuteReaderAsync();
