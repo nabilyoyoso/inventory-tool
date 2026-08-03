@@ -136,52 +136,6 @@ app.MapGet("/sync/status", (HttpContext ctx) =>
 app.Run();
 
 // ============================================================================
-// SYNC STATUS — simple in-memory tracker so /sync can return instantly while
-// the real work continues in the background, and callers can poll progress.
-// This resets if the service restarts or spins down, which is fine — it's
-// just a "what's happening right now" indicator, not a permanent record
-// (permanent history already lives in the sync_log table in Supabase).
-// ============================================================================
-static class SyncStatus
-{
-    private static readonly object _lock = new();
-    private static bool _isRunning = false;
-    private static string _lastLog = "";
-    private static bool? _lastSuccess = null;
-    private static DateTime? _lastFinishedAt = null;
-
-    public static void MarkStarted()
-    {
-        lock (_lock) { _isRunning = true; _lastLog = ""; }
-    }
-
-    public static void UpdateLog(string log)
-    {
-        lock (_lock) { _lastLog = log; }
-    }
-
-    public static void MarkFinished(bool success, string log)
-    {
-        lock (_lock) { _isRunning = false; _lastSuccess = success; _lastLog = log; _lastFinishedAt = DateTime.Now; }
-    }
-
-    public static object Snapshot()
-    {
-        lock (_lock)
-        {
-            return new
-            {
-                isRunning = _isRunning,
-                lastSuccess = _lastSuccess,
-                lastFinishedAt = _lastFinishedAt,
-                log = _lastLog,
-            };
-        }
-    }
-}
-
-
-// ============================================================================
 // AUTH — accepts either the shared secret key (for the scheduler) or a real
 // logged-in user's Supabase session token (for the Refresh button).
 // ============================================================================
@@ -488,6 +442,51 @@ class SyncRunner
             // connection instead of possibly reusing this broken one.
             NpgsqlConnection.ClearPool(target);
             throw;
+        }
+    }
+}
+
+// ============================================================================
+// SYNC STATUS — simple in-memory tracker so /sync can return instantly while
+// the real work continues in the background, and callers can poll progress.
+// This resets if the service restarts or spins down, which is fine — it's
+// just a "what's happening right now" indicator, not a permanent record
+// (permanent history already lives in the sync_log table in Supabase).
+// ============================================================================
+static class SyncStatus
+{
+    private static readonly object _lock = new();
+    private static bool _isRunning = false;
+    private static string _lastLog = "";
+    private static bool? _lastSuccess = null;
+    private static DateTime? _lastFinishedAt = null;
+
+    public static void MarkStarted()
+    {
+        lock (_lock) { _isRunning = true; _lastLog = ""; }
+    }
+
+    public static void UpdateLog(string log)
+    {
+        lock (_lock) { _lastLog = log; }
+    }
+
+    public static void MarkFinished(bool success, string log)
+    {
+        lock (_lock) { _isRunning = false; _lastSuccess = success; _lastLog = log; _lastFinishedAt = DateTime.Now; }
+    }
+
+    public static object Snapshot()
+    {
+        lock (_lock)
+        {
+            return new
+            {
+                isRunning = _isRunning,
+                lastSuccess = _lastSuccess,
+                lastFinishedAt = _lastFinishedAt,
+                log = _lastLog,
+            };
         }
     }
 }
