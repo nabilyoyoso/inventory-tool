@@ -72,6 +72,8 @@
   button.secondary { background: transparent; color: var(--ink); border-color: var(--ink); }
   button.secondary:hover { background: var(--ink); color: var(--paper); }
   button.secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.header-btn { background: transparent; color: var(--paper); border-color: var(--paper); }
+  button.header-btn:hover { background: var(--paper); color: var(--ink); }
   button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 
   .status-line { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); margin: 14px 0 0; }
@@ -132,8 +134,8 @@
   </div>
   <div style="display:flex; align-items:center; gap:16px;">
     <div id="lastUpdated">Checking last sync…</div>
-    <button type="button" class="secondary" id="btnRefreshSync" style="padding:6px 14px; font-size:12px;">Refresh</button>
-    <button type="button" class="secondary" id="btnLogout" style="padding:6px 14px; font-size:12px;">Sign out</button>
+    <button type="button" class="secondary header-btn" id="btnRefreshSync" style="padding:6px 14px; font-size:12px;">Refresh</button>
+    <button type="button" class="secondary header-btn" id="btnLogout" style="padding:6px 14px; font-size:12px;">Sign out</button>
   </div>
 </header>
 <div class="barcode-stripe" id="stripe"></div>
@@ -194,7 +196,15 @@
 const SUPABASE_URL = 'https://pqaxhpfrrwqshqsretvo.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxYXhocGZycndxc2hxc3JldHZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwNjI4MjYsImV4cCI6MjEwMDYzODgyNn0.Nc5l-Di2CFZWx5lyImvFn5-odC4GTfabKg5k_t_WbI0';
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    // sessionStorage (unlike the default localStorage) is wiped automatically
+    // when the tab or browser closes, so the user is logged out on reopening.
+    storage: window.sessionStorage,
+    persistSession: true,
+    autoRefreshToken: true,
+  },
+});
 
 // ---- Authentication gate ----
 const loginEls = {
