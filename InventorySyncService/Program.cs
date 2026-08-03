@@ -73,44 +73,112 @@ app.MapGet("/sync", async (HttpContext ctx) =>
     if (!await syncLock.WaitAsync(0))
     {
         ctx.Response.StatusCode = 409;
-        await ctx.Response.WriteAsync("A sync is already running. Try again shortly.");
+        await ctx.Response.WriteAsync("A sync is already running. Check /sync/status for progress.");
         return;
     }
 
-    try
+    // Kick the actual work off in the background and respond immediately.
+    // This avoids holding the HTTP connection open for the several minutes
+    // a full sync can take — which risks the browser or Render's own
+    // infrastructure killing the connection and showing "Failed to fetch."
+    SyncStatus.MarkStarted();
+    _ = Task.Run(async () =>
     {
-        var log = new StringBuilder();
-        void Log(string msg) { log.AppendLine(msg); Console.WriteLine(msg); }
-
-        string? sourceConnStr = Environment.GetEnvironmentVariable("ERP_CONNECTION_STRING");
-        string? supabaseConnStr = Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
-
-        if (string.IsNullOrEmpty(sourceConnStr) || string.IsNullOrEmpty(supabaseConnStr))
+        try
         {
-            await ctx.Response.WriteAsync("!! Missing ERP_CONNECTION_STRING or SUPABASE_CONNECTION_STRING.");
-            return;
+            var log = new StringBuilder();
+            void Log(string msg) { log.AppendLine(msg); Console.WriteLine(msg); SyncStatus.UpdateLog(log.ToString()); }
+
+            string? sourceConnStr = Environment.GetEnvironmentVariable("ERP_CONNECTION_STRING");
+            string? supabaseConnStr = Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
+
+            if (string.IsNullOrEmpty(sourceConnStr) || string.IsNullOrEmpty(supabaseConnStr))
+            {
+                Log("!! Missing ERP_CONNECTION_STRING or SUPABASE_CONNECTION_STRING.");
+                SyncStatus.MarkFinished(false, log.ToString());
+                return;
+            }
+
+            Log($"=== Inventory sync started: {DateTime.Now} ===");
+
+            var runner = new SyncRunner(sourceConnStr, supabaseConnStr, Log);
+            bool success = await runner.RunFullSyncAsync(BuildTableSpecs());
+
+            Log(success
+                ? $"=== SYNC SUCCESSFUL — all tables updated together: {DateTime.Now} ==="
+                : $"=== SYNC FAILED — no changes were applied, all data unchanged: {DateTime.Now} ===");
+
+            SyncStatus.MarkFinished(success, log.ToString());
         }
+        catch (Exception ex)
+        {
+            SyncStatus.MarkFinished(false, $"!! Unexpected error: {ex.Message}");
+        }
+        finally
+        {
+            syncLock.Release();
+        }
+    });
 
-        Log($"=== Inventory sync started: {DateTime.Now} ===");
+    ctx.Response.StatusCode = 202; // Accepted — work is running in the background
+    ctx.Response.ContentType = "text/plain";
+    await ctx.Response.WriteAsync("Sync started in the background. Poll /sync/status for progress.");
+});
 
-        var runner = new SyncRunner(sourceConnStr, supabaseConnStr, Log);
-        bool success = await runner.RunFullSyncAsync(BuildTableSpecs());
-
-        Log(success
-            ? $"=== SYNC SUCCESSFUL — all tables updated together: {DateTime.Now} ==="
-            : $"=== SYNC FAILED — no changes were applied, all data unchanged: {DateTime.Now} ===");
-
-        ctx.Response.ContentType = "text/plain";
-        ctx.Response.StatusCode = success ? 200 : 500;
-        await ctx.Response.WriteAsync(log.ToString());
-    }
-    finally
-    {
-        syncLock.Release();
-    }
+// Lets the front-end (or you, manually) check on a sync that's running in
+// the background, instead of waiting on one long-held request.
+app.MapGet("/sync/status", (HttpContext ctx) =>
+{
+    ctx.Response.ContentType = "application/json";
+    return ctx.Response.WriteAsync(JsonSerializer.Serialize(SyncStatus.Snapshot()));
 });
 
 app.Run();
+
+// ============================================================================
+// SYNC STATUS — simple in-memory tracker so /sync can return instantly while
+// the real work continues in the background, and callers can poll progress.
+// This resets if the service restarts or spins down, which is fine — it's
+// just a "what's happening right now" indicator, not a permanent record
+// (permanent history already lives in the sync_log table in Supabase).
+// ============================================================================
+static class SyncStatus
+{
+    private static readonly object _lock = new();
+    private static bool _isRunning = false;
+    private static string _lastLog = "";
+    private static bool? _lastSuccess = null;
+    private static DateTime? _lastFinishedAt = null;
+
+    public static void MarkStarted()
+    {
+        lock (_lock) { _isRunning = true; _lastLog = ""; }
+    }
+
+    public static void UpdateLog(string log)
+    {
+        lock (_lock) { _lastLog = log; }
+    }
+
+    public static void MarkFinished(bool success, string log)
+    {
+        lock (_lock) { _isRunning = false; _lastSuccess = success; _lastLog = log; _lastFinishedAt = DateTime.Now; }
+    }
+
+    public static object Snapshot()
+    {
+        lock (_lock)
+        {
+            return new
+            {
+                isRunning = _isRunning,
+                lastSuccess = _lastSuccess,
+                lastFinishedAt = _lastFinishedAt,
+                log = _lastLog,
+            };
+        }
+    }
+}
 
 
 // ============================================================================
@@ -381,31 +449,45 @@ class SyncRunner
         using var target = new NpgsqlConnection(_targetConnStr);
         await target.OpenAsync();
 
-        using var cmd = new SqlCommand(sourceSql, source);
-        if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
-
-        using var reader = await cmd.ExecuteReaderAsync();
-
-        string colList = string.Join(", ", columns);
-        await using var writer = await target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
-
-        int count = 0;
-        var row = new object?[columns.Length];
-        while (await reader.ReadAsync())
+        try
         {
-            reader.GetValues(row!);
-            await writer.StartRowAsync();
-            for (int i = 0; i < row.Length; i++)
-            {
-                var val = row[i] is DBNull ? null : row[i];
-                if (val == null) await writer.WriteNullAsync();
-                else if (types[i] == NpgsqlDbType.Date && val is DateTime dt) await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
-                else await writer.WriteAsync(val, types[i]);
-            }
-            count++;
-        }
+            using var cmd = new SqlCommand(sourceSql, source);
+            if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
 
-        await writer.CompleteAsync();
-        return count;
+            using var reader = await cmd.ExecuteReaderAsync();
+
+            string colList = string.Join(", ", columns);
+            await using var writer = await target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
+
+            int count = 0;
+            var row = new object?[columns.Length];
+            while (await reader.ReadAsync())
+            {
+                reader.GetValues(row!);
+                await writer.StartRowAsync();
+                for (int i = 0; i < row.Length; i++)
+                {
+                    var val = row[i] is DBNull ? null : row[i];
+                    if (val == null) await writer.WriteNullAsync();
+                    else if (types[i] == NpgsqlDbType.Date && val is DateTime dt) await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
+                    else await writer.WriteAsync(val, types[i]);
+                }
+                count++;
+            }
+
+            await writer.CompleteAsync();
+            return count;
+        }
+        catch
+        {
+            // A connection that dies mid-COPY leaves Postgres in a state where
+            // the next command sent on it fails immediately with a confusing
+            // "unexpected message type" error — even though that next command
+            // is for a completely different, otherwise-healthy table. Clearing
+            // the pool here means the very next table opens a guaranteed-fresh
+            // connection instead of possibly reusing this broken one.
+            NpgsqlConnection.ClearPool(target);
+            throw;
+        }
     }
 }
