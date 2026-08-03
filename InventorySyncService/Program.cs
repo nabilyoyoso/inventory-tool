@@ -40,7 +40,19 @@ using System.Text.Json;
 var builder = WebApplication.CreateBuilder(args);
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
+// Without this, the browser blocks every request from the GitHub Pages front-end
+// before it's even sent — that's what shows up in the browser as "Failed to fetch".
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+        policy.WithOrigins("https://nabilyoyoso.github.io")
+              .AllowAnyHeader()
+              .AllowAnyMethod());
+});
+
 var app = builder.Build();
+app.UseCors("AllowFrontend");
 
 var httpClient = new HttpClient();
 
