@@ -240,34 +240,76 @@ const SYNC_SERVICE_URL = 'https://inventory-sync-service.onrender.com/sync';
 document.getElementById('btnRefreshSync').addEventListener('click', async () => {
   const btn = document.getElementById('btnRefreshSync');
   btn.disabled = true;
-  btn.textContent = 'Syncing…';
-  showToast('Sync started — this can take a minute on a large update…', 'success', 4000);
+  btn.textContent = 'Starting…';
 
   try {
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) { showToast('You need to be signed in to refresh.', 'error'); return; }
+    if (!session) { showToast('You need to be signed in to refresh.', 'error'); btn.disabled = false; btn.textContent = 'Refresh'; return; }
 
     const resp = await fetch(SYNC_SERVICE_URL, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
-    const text = await resp.text();
 
-    if (resp.ok) {
-      showToast('Sync completed successfully — data is up to date.', 'success');
-    } else if (resp.status === 409) {
-      showToast('A sync was already running — try again in a moment.', 'error');
-    } else {
-      showToast('Sync failed — no data was changed. Check with your admin.', 'error');
-      console.error('Sync failure detail:', text);
+    // 202 = a new sync just started in the background.
+    // 409 = one was already running — either way, start watching its progress.
+    if (resp.status !== 202 && resp.status !== 409) {
+      const text = await resp.text();
+      showToast('Could not start sync — check with your admin.', 'error');
+      console.error('Sync start failure detail:', text);
+      btn.disabled = false;
+      btn.textContent = 'Refresh';
+      return;
     }
+
+    showToast('Sync running in the background — this can take a few minutes…', 'success', 4000);
+    btn.textContent = 'Syncing…';
+    await pollSyncStatus(btn);
   } catch (err) {
     showToast('Could not reach the sync service: ' + err.message, 'error');
-  } finally {
     btn.disabled = false;
     btn.textContent = 'Refresh';
-    loadLastUpdated();
   }
 });
+
+// Checks /sync/status every few seconds until the background sync finishes,
+// then shows the real result. Gives up after 10 minutes as a safety net so
+// the button never gets stuck forever if something goes wrong silently.
+async function pollSyncStatus(btn) {
+  const maxWaitMs = 10 * 60 * 1000;
+  const intervalMs = 4000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    await new Promise(r => setTimeout(r, intervalMs));
+
+    let status;
+    try {
+      const resp = await fetch(`${SYNC_SERVICE_URL}/status`);
+      status = await resp.json();
+    } catch {
+      continue; // a single failed status check isn't fatal — just try again next tick
+    }
+
+    if (!status.isRunning) {
+      if (status.lastSuccess === true) {
+        showToast('Sync completed successfully — data is up to date.', 'success');
+      } else {
+        showToast('Sync finished with errors — no data was changed. Check with your admin.', 'error');
+        console.error('Sync log:', status.log);
+      }
+      btn.disabled = false;
+      btn.textContent = 'Refresh';
+      loadLastUpdated();
+      return;
+    }
+  }
+
+  // Timed out waiting — the sync may still finish on its own; the "Data last
+  // updated" indicator will reflect it once it does.
+  showToast('Still running — check back in a bit. This will finish on its own.', 'error');
+  btn.disabled = false;
+  btn.textContent = 'Refresh';
+}
 
 function showToast(message, type, durationMs = 5000) {
   const existing = document.querySelector('.toast');
