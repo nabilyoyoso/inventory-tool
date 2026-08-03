@@ -187,6 +187,7 @@
 </div><!-- /#appContent -->
 
 <script>
+(function() {
 /* =====================================================================
    CONFIG — fill in your Supabase project URL and anon public key below.
    ===================================================================== */
@@ -478,6 +479,7 @@ els.btnExport.addEventListener('click', () => {
 
 // ---- Print / Save as PDF (browser-native, no extra library needed) ----
 els.btnPrint.addEventListener('click', () => window.print());
+})();
 </script>
 
 </body>
