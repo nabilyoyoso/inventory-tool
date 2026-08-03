@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Report</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  :root {
+    --ink: #1C1E22;
+    --paper: #F7F5F0;
+    --panel: #FFFFFF;
+    --line: #DDD8CC;
+    --amber: #C98A3E;
+    --amber-dark: #A66F2E;
+    --teal: #3F6E64;
+    --danger: #B4442E;
+    --muted: #6B6A63;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+
+  .barcode-stripe {
+    height: 10px; width: 100%;
+    background-image: repeating-linear-gradient(90deg,
+      var(--ink) 0px, var(--ink) 2px, transparent 2px, transparent 5px,
+      var(--ink) 5px, var(--ink) 6px, transparent 6px, transparent 11px,
+      var(--ink) 11px, var(--ink) 14px, transparent 14px, transparent 17px);
+    opacity: 0.85;
+  }
+  .barcode-stripe.loading { animation: stripe-scan 1.1s linear infinite; background-size: 200% 100%; }
+  @keyframes stripe-scan { 0% { background-position: 0% 0; } 100% { background-position: -60px 0; } }
+  @media (prefers-reduced-motion: reduce) { .barcode-stripe.loading { animation: none; } }
+
+  header { background: var(--ink); color: var(--paper); padding: 24px clamp(16px, 4vw, 48px) 18px; display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px; }
+  header .eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber); margin: 0 0 6px; }
+  header h1 { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: clamp(22px, 4vw, 30px); letter-spacing: 0.01em; margin: 0; text-transform: uppercase; }
+  #lastUpdated { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #C8C4B8; }
+  #lastUpdated strong { color: var(--paper); }
+
+  .toast { position: fixed; bottom: 24px; right: 24px; max-width: 340px; padding: 14px 18px; border-radius: var(--radius); font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 500; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 1000; animation: toast-in 0.2s ease-out; }
+  .toast.success { background: var(--teal); color: white; }
+  .toast.error { background: var(--danger); color: white; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+  main { max-width: 1500px; margin: 0 auto; padding: clamp(16px, 4vw, 40px); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: clamp(16px, 3vw, 28px); margin-bottom: 20px; }
+
+  .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 18px; align-items: end; }
+  .field label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+  .field select, .field input[type="date"] { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 14px; }
+  .field select:focus, .field input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  .report-toggle { display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .report-toggle button { flex: 1; padding: 10px 8px; border: none; background: var(--paper); color: var(--muted); font-family: 'Inter', sans-serif; font-weight: 600; font-size: 12.5px; cursor: pointer; }
+  .report-toggle button.active { background: var(--ink); color: var(--paper); }
+  .report-toggle button:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
+
+  .actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+  button.primary, button.secondary { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 14px; padding: 11px 20px; border-radius: var(--radius); cursor: pointer; border: 1px solid transparent; }
+  button.primary { background: var(--amber); color: var(--ink); border-color: var(--amber); }
+  button.primary:hover { background: var(--amber-dark); }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--ink); border-color: var(--ink); }
+  button.secondary:hover { background: var(--ink); color: var(--paper); }
+  button.secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  .status-line { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); margin: 14px 0 0; }
+  .status-line.error { color: var(--danger); }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  thead th { text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); background: var(--paper); border-bottom: 2px solid var(--ink); padding: 10px 12px; white-space: nowrap; position: sticky; top: 0; }
+  thead th.num { text-align: right; }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; white-space: nowrap; }
+  tbody td.num { text-align: right; font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: #FBF9F4; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .empty-state, .initial-state { padding: 48px 24px; text-align: center; color: var(--muted); }
+  .empty-state .headline, .initial-state .headline { font-family: 'Oswald', sans-serif; font-size: 18px; color: var(--ink); text-transform: uppercase; margin-bottom: 6px; }
+
+  footer { text-align: center; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; padding: 28px 16px 40px; }
+
+  @media print {
+    header, .panel .filters, .actions, footer, .barcode-stripe { display: none !important; }
+    .panel { border: none; padding: 0; }
+    body { background: white; }
+  }
+
+  #loginScreen { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--ink); padding: 20px; }
+  .login-card { background: var(--panel); border-radius: var(--radius); padding: 36px 32px; width: 100%; max-width: 360px; }
+  .login-card .field label { display:block; font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:var(--muted); margin-bottom:7px; }
+  .login-card input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper); font-family:'Inter',sans-serif; font-size:14px; }
+  .login-card input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+  <div class="login-card">
+    <p class="eyebrow" style="color:var(--amber)">Inventory Reporting</p>
+    <h1 style="font-family:'Oswald',sans-serif; text-transform:uppercase; margin:0 0 20px;">Sign in</h1>
+    <div class="field" style="margin-bottom:14px;">
+      <label for="loginEmail">Email</label>
+      <input type="email" id="loginEmail" autocomplete="username">
+    </div>
+    <div class="field" style="margin-bottom:18px;">
+      <label for="loginPassword">Password</label>
+      <input type="password" id="loginPassword" autocomplete="current-password">
+    </div>
+    <button type="button" class="primary" id="btnLogin" style="width:100%;">Sign in</button>
+    <p class="status-line" id="loginStatus" style="text-align:center;"></p>
+  </div>
+</div>
+
+<div id="appContent" style="display:none;">
+
+<header>
+  <div>
+    <p class="eyebrow">Inventory Reporting</p>
+    <h1>Stock Report</h1>
+  </div>
+  <div style="display:flex; align-items:center; gap:16px;">
+    <div id="lastUpdated">Checking last sync…</div>
+    <button type="button" class="secondary" id="btnRefreshSync" style="padding:6px 14px; font-size:12px;">Refresh</button>
+    <button type="button" class="secondary" id="btnLogout" style="padding:6px 14px; font-size:12px;">Sign out</button>
+  </div>
+</header>
+<div class="barcode-stripe" id="stripe"></div>
+
+<main>
+  <section class="panel">
+    <div class="filters">
+      <div class="field">
+        <label for="asOfDate">Stock as of date</label>
+        <input type="date" id="asOfDate">
+      </div>
+
+      <div class="field">
+        <label for="storeSelect">Select store</label>
+        <select id="storeSelect">
+          <option value="">All stores</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Report type</label>
+        <div class="report-toggle" role="group" aria-label="Report type">
+          <button type="button" id="btnStore" class="active">Store Wise</button>
+          <button type="button" id="btnBarcode">Barcode Wise</button>
+          <button type="button" id="btnSaleBarcode">Sale_Barcode Wise</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="primary" id="btnGenerate">Generate report</button>
+      <button type="button" class="secondary" id="btnExport" disabled>Download Excel</button>
+      <button type="button" class="secondary" id="btnPrint" disabled>Print / Save PDF</button>
+    </div>
+
+    <p class="status-line" id="statusLine">Pick a date and store, then generate a report.</p>
+  </section>
+
+  <section class="panel" style="padding:0; overflow:hidden;">
+    <div id="resultsArea">
+      <div class="initial-state">
+        <div class="headline">No report yet</div>
+        <div>Set your filters above and click Generate report.</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>Data refreshes automatically every 30 minutes from the ERP sync job.</footer>
+
+</div><!-- /#appContent -->
+
+<script>
+/* =====================================================================
+   CONFIG — fill in your Supabase project URL and anon public key below.
+   ===================================================================== */
+const SUPABASE_URL = 'https://pqaxhpfrrwqshqsretvo.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxYXhocGZycndxc2hxc3JldHZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwNjI4MjYsImV4cCI6MjEwMDYzODgyNn0.Nc5l-Di2CFZWx5lyImvFn5-odC4GTfabKg5k_t_WbI0';
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ---- Authentication gate ----
+const loginEls = {
+  screen: document.getElementById('loginScreen'),
+  app: document.getElementById('appContent'),
+  email: document.getElementById('loginEmail'),
+  password: document.getElementById('loginPassword'),
+  btnLogin: document.getElementById('btnLogin'),
+  status: document.getElementById('loginStatus'),
+};
+
+async function checkAuth() {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) {
+    showApp();
+  } else {
+    loginEls.screen.style.display = 'flex';
+    loginEls.app.style.display = 'none';
+  }
+}
+
+function showApp() {
+  loginEls.screen.style.display = 'none';
+  loginEls.app.style.display = 'block';
+  loadStores();
+  loadLastUpdated();
+}
+
+// ---- Manual "Refresh" button: triggers the sync service using this user's
+// own login session (no shared secret needed in this public front-end code) ----
+const SYNC_SERVICE_URL = 'https://inventory-sync-service.onrender.com/sync';
+
+document.getElementById('btnRefreshSync').addEventListener('click', async () => {
+  const btn = document.getElementById('btnRefreshSync');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  showToast('Sync started — this can take a minute on a large update…', 'success', 4000);
+
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) { showToast('You need to be signed in to refresh.', 'error'); return; }
+
+    const resp = await fetch(SYNC_SERVICE_URL, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const text = await resp.text();
+
+    if (resp.ok) {
+      showToast('Sync completed successfully — data is up to date.', 'success');
+    } else if (resp.status === 409) {
+      showToast('A sync was already running — try again in a moment.', 'error');
+    } else {
+      showToast('Sync failed — no data was changed. Check with your admin.', 'error');
+      console.error('Sync failure detail:', text);
+    }
+  } catch (err) {
+    showToast('Could not reach the sync service: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+    loadLastUpdated();
+  }
+});
+
+function showToast(message, type, durationMs = 5000) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), durationMs);
+}
+
+loginEls.btnLogin.addEventListener('click', doLogin);
+loginEls.password.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+
+async function doLogin() {
+  loginEls.status.textContent = 'Signing in…';
+  loginEls.status.classList.remove('error');
+  const { error } = await supabase.auth.signInWithPassword({
+    email: loginEls.email.value.trim(),
+    password: loginEls.password.value,
+  });
+  if (error) {
+    loginEls.status.textContent = 'Sign in failed: ' + error.message;
+    loginEls.status.classList.add('error');
+    return;
+  }
+  showApp();
+}
+
+document.getElementById('btnLogout').addEventListener('click', async () => {
+  await supabase.auth.signOut();
+  location.reload();
+});
+
+checkAuth();
+
+let reportType = 'store'; // 'store' | 'barcode' | 'sale_barcode'
+let currentRows = [];
+
+const els = {
+  date: document.getElementById('asOfDate'),
+  store: document.getElementById('storeSelect'),
+  btnStore: document.getElementById('btnStore'),
+  btnBarcode: document.getElementById('btnBarcode'),
+  btnSaleBarcode: document.getElementById('btnSaleBarcode'),
+  btnGenerate: document.getElementById('btnGenerate'),
+  btnExport: document.getElementById('btnExport'),
+  btnPrint: document.getElementById('btnPrint'),
+  status: document.getElementById('statusLine'),
+  results: document.getElementById('resultsArea'),
+  stripe: document.getElementById('stripe'),
+  lastUpdated: document.getElementById('lastUpdated'),
+};
+
+els.date.value = new Date().toISOString().slice(0, 10);
+
+// ---- Report type toggle ----
+els.btnStore.addEventListener('click', () => setReportType('store'));
+els.btnBarcode.addEventListener('click', () => setReportType('barcode'));
+els.btnSaleBarcode.addEventListener('click', () => setReportType('sale_barcode'));
+function setReportType(type) {
+  reportType = type;
+  els.btnStore.classList.toggle('active', type === 'store');
+  els.btnBarcode.classList.toggle('active', type === 'barcode');
+  els.btnSaleBarcode.classList.toggle('active', type === 'sale_barcode');
+}
+
+// ---- Store list ----
+async function loadStores() {
+  const { data, error } = await supabase.from('store').select('store_code, store_name').order('store_name');
+  if (error) { setStatus('Could not load the store list: ' + error.message, true); return; }
+  for (const s of data) {
+    const opt = document.createElement('option');
+    opt.value = s.store_code;
+    opt.textContent = s.store_name;
+    els.store.appendChild(opt);
+  }
+}
+
+// ---- "Data last updated" indicator, refreshed periodically ----
+async function loadLastUpdated() {
+  const { data, error } = await supabase
+    .from('sync_log')
+    .select('last_synced_at')
+    .order('last_synced_at', { ascending: true })
+    .limit(1);
+
+  if (error || !data || !data.length || !data[0].last_synced_at) {
+    els.lastUpdated.textContent = 'Sync status unavailable';
+    return;
+  }
+  const dt = new Date(data[0].last_synced_at);
+  const mins = Math.round((Date.now() - dt.getTime()) / 60000);
+  const label = mins < 1 ? 'just now' : mins === 1 ? '1 minute ago' : `${mins} minutes ago`;
+  els.lastUpdated.innerHTML = `Data last updated: <strong>${label}</strong>`;
+}
+setInterval(loadLastUpdated, 60000);
+
+// ---- Generate report ----
+els.btnGenerate.addEventListener('click', generateReport);
+
+async function generateReport() {
+  const asOfDate = els.date.value;
+  if (!asOfDate) { setStatus('Pick a date first.', true); return; }
+  const storeCode = els.store.value || null;
+
+  setLoading(true);
+  setStatus('Running report…');
+  els.btnExport.disabled = true;
+  els.btnPrint.disabled = true;
+
+  const fnMap = {
+    store: 'get_store_wise_report',
+    barcode: 'get_barcode_wise_report',
+    sale_barcode: 'get_sale_barcode_wise_report',
+  };
+  const { data, error } = await supabase.rpc(fnMap[reportType], {
+    as_of_date: asOfDate,
+    p_store_code: storeCode,
+  });
+
+  setLoading(false);
+
+  if (error) {
+    setStatus('Report failed: ' + error.message, true);
+    renderEmpty('Report failed', error.message);
+    return;
+  }
+
+  currentRows = data || [];
+  if (currentRows.length === 0) {
+    setStatus(`No stock found for ${asOfDate}.`);
+    renderEmpty('Nothing to show', 'No stock movement found for this date and store.');
+    return;
+  }
+
+  setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
+  renderTable(currentRows);
+  els.btnExport.disabled = false;
+  els.btnPrint.disabled = false;
+}
+
+// ---- Column definitions per report type ----
+function getColumns() {
+  const qtyCols = [
+    ['opening_stock_qty', 'Opening Qty', true], ['on_hand_stock_qty', 'On Hand Qty', true],
+    ['pending_stock_qty', 'Pending Qty', true], ['gross_stock_qty', 'Gross Qty', true],
+  ];
+  const valueCols = [
+    ['opening_cost_value', 'Opening Cost Value', true], ['on_hand_cost_value', 'On Hand Cost Value', true],
+    ['pending_cost_value', 'Pending Cost Value', true], ['gross_cost_value', 'Gross Cost Value', true],
+    ['opening_sal_value', 'Opening Sale Value', true], ['on_hand_sal_value', 'On Hand Sale Value', true],
+    ['pending_sal_value', 'Pending Sale Value', true], ['gross_sal_value', 'Gross Sale Value', true],
+  ];
+
+  if (reportType === 'store') {
+    return [['store_name', 'Store', false], ...qtyCols];
+  }
+  const itemCols = [
+    ['store_name', 'Store', false], ['barcode', 'Barcode', false],
+  ];
+  if (reportType === 'sale_barcode') itemCols.push(['sal_barcode', 'Sal Barcode', false]);
+  itemCols.push(
+    ['user_barcode', 'User Barcode', false], ['category', 'Category', false], ['sub_category', 'Sub-Category', false],
+    ['item_name', 'Item Name', false], ['cpu', 'CPU', true], ['mrp', 'MRP', true],
+  );
+  return [...itemCols, ...qtyCols, ...valueCols, ['stock_age_days', 'Stock Age (Days)', true]];
+}
+
+function renderTable(rows) {
+  const columns = getColumns();
+  let html = '<div class="table-wrap"><table><thead><tr>';
+  for (const [, label, isNum] of columns) html += `<th class="${isNum ? 'num' : ''}">${label}</th>`;
+  html += '</tr></thead><tbody>';
+  for (const row of rows) {
+    html += '<tr>';
+    for (const [key, , isNum] of columns) {
+      const val = row[key];
+      html += `<td class="${isNum ? 'num' : ''}">${isNum ? formatNumber(val) : (val ?? '')}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+  els.results.innerHTML = html;
+}
+
+function renderEmpty(headline, detail) {
+  els.results.innerHTML = `<div class="empty-state"><div class="headline">${headline}</div><div>${detail}</div></div>`;
+}
+
+function formatNumber(val) {
+  if (val === null || val === undefined) return '—';
+  const n = Number(val);
+  if (Number.isNaN(n)) return String(val);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function setStatus(msg, isError = false) {
+  els.status.textContent = msg;
+  els.status.classList.toggle('error', isError);
+}
+
+function setLoading(isLoading) {
+  els.btnGenerate.disabled = isLoading;
+  els.stripe.classList.toggle('loading', isLoading);
+}
+
+// ---- Excel export ----
+els.btnExport.addEventListener('click', () => {
+  if (currentRows.length === 0) return;
+  const ws = XLSX.utils.json_to_sheet(currentRows);
+  const wb = XLSX.utils.book_new();
+  const sheetNames = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' };
+  const sheetName = sheetNames[reportType];
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  const storeLabel = els.store.value ? els.store.options[els.store.selectedIndex].text.replace(/\s+/g, '_') : 'AllStores';
+  XLSX.writeFile(wb, `StockReport_${sheetName.replace(/\s|_/g, '')}_${storeLabel}_${els.date.value}.xlsx`);
+});
+
+// ---- Print / Save as PDF (browser-native, no extra library needed) ----
+els.btnPrint.addEventListener('click', () => window.print());
+</script>
+
+</body>
+</html>
