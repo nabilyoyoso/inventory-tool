@@ -235,7 +235,8 @@ function showApp() {
 
 // ---- Manual "Refresh" button: triggers the sync service using this user's
 // own login session (no shared secret needed in this public front-end code) ----
-const SYNC_SERVICE_URL = 'https://inventory-sync-service.onrender.com/sync';
+const SYNC_TRIGGER_URL = 'https://inventory-sync-service.onrender.com/trigger-sync';
+const SYNC_STATUS_URL = 'https://inventory-sync-service.onrender.com/sync-status';
 
 document.getElementById('btnRefreshSync').addEventListener('click', async () => {
   const btn = document.getElementById('btnRefreshSync');
@@ -246,13 +247,12 @@ document.getElementById('btnRefreshSync').addEventListener('click', async () => 
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) { showToast('You need to be signed in to refresh.', 'error'); btn.disabled = false; btn.textContent = 'Refresh'; return; }
 
-    const resp = await fetch(SYNC_SERVICE_URL, {
+    const resp = await fetch(SYNC_TRIGGER_URL, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
 
-    // 202 = a new sync just started in the background.
-    // 409 = one was already running — either way, start watching its progress.
-    if (resp.status !== 202 && resp.status !== 409) {
+    // 202 = GitHub accepted the trigger and queued/started the run.
+    if (resp.status !== 202) {
       const text = await resp.text();
       showToast('Could not start sync — check with your admin.', 'error');
       console.error('Sync start failure detail:', text);
@@ -284,7 +284,7 @@ async function pollSyncStatus(btn) {
 
     let status;
     try {
-      const resp = await fetch(`${SYNC_SERVICE_URL}/status`);
+      const resp = await fetch(SYNC_STATUS_URL);
       status = await resp.json();
     } catch {
       continue; // a single failed status check isn't fatal — just try again next tick
@@ -294,8 +294,7 @@ async function pollSyncStatus(btn) {
       if (status.lastSuccess === true) {
         showToast('Sync completed successfully — data is up to date.', 'success');
       } else {
-        showToast('Sync finished with errors — no data was changed. Check with your admin.', 'error');
-        console.error('Sync log:', status.log);
+        showToast('Sync finished with errors — no data was changed. Check the Actions tab on GitHub for details.', 'error');
       }
       btn.disabled = false;
       btn.textContent = 'Refresh';
