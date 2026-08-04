@@ -473,8 +473,9 @@ function getColumns() {
   if (reportType === 'sale_barcode') itemCols.push(['sal_barcode', 'Sal Barcode', false]);
   itemCols.push(
     ['user_barcode', 'User Barcode', false], ['category', 'Category', false], ['sub_category', 'Sub-Category', false],
-    ['item_name', 'Item Name', false], ['cpu', 'CPU', true], ['mrp', 'MRP', true],
+    ['item_name', 'Item Name', false],
   );
+  if (reportType === 'sale_barcode') itemCols.push(['cpu', 'CPU', true], ['mrp', 'MRP', true]);
   return [...itemCols, ...qtyCols, ...valueCols, ['stock_age_days', 'Stock Age (Days)', true]];
 }
 
