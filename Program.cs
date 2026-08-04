@@ -209,6 +209,24 @@ class SyncRunner
             }
 
             await tx.CommitAsync();
+
+            _log("--- Swap complete. Clearing staging tables... ---");
+            foreach (var (spec, _, _) in staged)
+            {
+                try
+                {
+                    using var cleanupCmd = new NpgsqlCommand($"TRUNCATE TABLE {spec.TargetTable}_staging", target);
+                    await cleanupCmd.ExecuteNonQueryAsync();
+                }
+                catch (Exception ex)
+                {
+                    // Not critical: the real data already swapped in successfully above.
+                    // A leftover staging table just gets cleared at the start of the
+                    // next run instead — nothing is lost or at risk here.
+                    _log($"    (non-critical) Could not clear staging table for {spec.TargetTable}: {ex.Message}");
+                }
+            }
+
             return true;
         }
         catch (Exception ex)
