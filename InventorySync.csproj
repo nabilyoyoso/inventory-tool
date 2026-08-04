@@ -12,4 +12,13 @@
     <PackageReference Include="Npgsql" Version="8.0.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- InventorySyncService is a separate project with its own Program.cs
+         (also using top-level statements). Without this, the root project's
+         default file search would pull that file in too, and the build
+         would fail with "Only one compilation unit can have top-level
+         statements." -->
+    <Compile Remove="InventorySyncService/**/*.cs" />
+  </ItemGroup>
+
 </Project>
