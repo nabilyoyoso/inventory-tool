@@ -137,10 +137,18 @@ static async Task<bool> IsLoggedInUserAsync(HttpContext ctx)
 {
     var supabaseUrl = Environment.GetEnvironmentVariable("SUPABASE_URL");
     var supabaseAnonKey = Environment.GetEnvironmentVariable("SUPABASE_ANON_KEY");
-    if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(supabaseAnonKey)) return false;
+    if (string.IsNullOrEmpty(supabaseUrl) || string.IsNullOrEmpty(supabaseAnonKey))
+    {
+        Console.WriteLine("Auth check failed: SUPABASE_URL or SUPABASE_ANON_KEY is missing on this service.");
+        return false;
+    }
 
     var authHeader = ctx.Request.Headers["Authorization"].ToString();
-    if (!authHeader.StartsWith("Bearer ")) return false;
+    if (!authHeader.StartsWith("Bearer "))
+    {
+        Console.WriteLine("Auth check failed: no Bearer token was sent in the Authorization header.");
+        return false;
+    }
 
     var token = authHeader["Bearer ".Length..];
     using var client = new HttpClient();
@@ -148,5 +156,12 @@ static async Task<bool> IsLoggedInUserAsync(HttpContext ctx)
     request.Headers.Add("Authorization", $"Bearer {token}");
     request.Headers.Add("apikey", supabaseAnonKey);
     var resp = await client.SendAsync(request);
+
+    if (!resp.IsSuccessStatusCode)
+    {
+        var body = await resp.Content.ReadAsStringAsync();
+        Console.WriteLine($"Auth check failed: Supabase rejected the token — {(int)resp.StatusCode} {resp.StatusCode}. Response: {body}");
+    }
+
     return resp.IsSuccessStatusCode;
 }
