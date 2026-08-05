@@ -446,9 +446,19 @@ async function generateReport() {
   }
 
   setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
-  renderTable(currentRows);
+  if (reportType === 'store') {
+    renderTable(currentRows);
+    els.btnPrint.disabled = false;
+  } else {
+    // Barcode Wise and Sale_Barcode Wise can return a very large number of
+    // rows — rendering all of them as an HTML table would be slow and
+    // impractical. The data is still fully available in memory for Download
+    // Excel; there's just nothing sensible to print, so that button stays
+    // disabled for these two report types.
+    renderReady(currentRows.length, asOfDate);
+    els.btnPrint.disabled = true;
+  }
   els.btnExport.disabled = false;
-  els.btnPrint.disabled = false;
 }
 
 // ---- Column definitions per report type ----
@@ -494,6 +504,13 @@ function renderTable(rows) {
   }
   html += '</tbody></table></div>';
   els.results.innerHTML = html;
+}
+
+function renderReady(rowCount, asOfDate) {
+  els.results.innerHTML = `<div class="empty-state">
+    <div class="headline">Report ready</div>
+    <div>${rowCount} row${rowCount === 1 ? '' : 's'} generated as of ${asOfDate}. Use Download Excel to get the full data.</div>
+  </div>`;
 }
 
 function renderEmpty(headline, detail) {
