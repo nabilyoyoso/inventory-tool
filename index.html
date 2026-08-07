@@ -24,6 +24,12 @@
     --danger: #B4442E;
     --muted: #6B6A63;
     --radius: 6px;
+    --success-fg: #4ADE94;
+    --success-bg: rgba(20, 46, 34, 0.92);
+    --error-fg: #FF8A73;
+    --error-bg: rgba(52, 20, 18, 0.92);
+    --neutral-fg: var(--amber);
+    --neutral-bg: rgba(28, 30, 34, 0.92);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--paper); color: var(--ink); font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -40,31 +46,88 @@
   @keyframes stripe-scan { 0% { background-position: 0% 0; } 100% { background-position: -60px 0; } }
   @media (prefers-reduced-motion: reduce) { .barcode-stripe.loading { animation: none; } }
 
-  header { background: var(--ink); color: var(--paper); padding: 24px clamp(16px, 4vw, 48px) 18px; display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px; }
+  header { background: var(--ink); color: var(--paper); padding: 22px clamp(16px, 4vw, 48px) 18px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px; }
   header .eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber); margin: 0 0 6px; }
   header h1 { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: clamp(22px, 4vw, 30px); letter-spacing: 0.01em; margin: 0; text-transform: uppercase; }
-  #lastUpdated { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #C8C4B8; }
-  #lastUpdated strong { color: var(--paper); }
+
+  .header-right { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+
+  /* ---- Sync info panel ---- */
+  .sync-panel { display:flex; align-items:center; gap:10px; padding: 7px 14px 7px 8px; border-radius: 999px; font-family:'IBM Plex Mono', monospace; font-size: 11.5px; }
+  .sync-pill { display:flex; align-items:center; gap:6px; padding: 5px 12px; border-radius: 999px; font-weight:600; letter-spacing:0.03em; }
+  .sync-pill .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .sync-pill.success { background: var(--success-bg); color: var(--success-fg); }
+  .sync-pill.error { background: var(--error-bg); color: var(--error-fg); }
+  .sync-pill.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+  .sync-pill.syncing .dot { animation: pulse-dot 1s ease-in-out infinite; }
+  @keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+  .sync-meta { color:#B9B5A8; white-space:nowrap; }
+  .sync-meta strong { color: var(--paper); font-weight:500; }
 
   .toast { position: fixed; bottom: 24px; right: 24px; max-width: 340px; padding: 14px 18px; border-radius: var(--radius); font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 500; box-shadow: 0 6px 20px rgba(0,0,0,0.25); z-index: 1000; animation: toast-in 0.2s ease-out; }
   .toast.success { background: var(--teal); color: white; }
   .toast.error { background: var(--danger); color: white; }
   @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-  main { max-width: 1500px; margin: 0 auto; padding: clamp(16px, 4vw, 40px); }
+  main { max-width: 1600px; margin: 0 auto; padding: clamp(16px, 4vw, 40px); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: clamp(16px, 3vw, 28px); margin-bottom: 20px; }
+  .panel h2 { font-family:'Oswald', sans-serif; font-size:15px; text-transform:uppercase; letter-spacing:0.04em; margin: 0 0 16px; color: var(--ink); }
 
-  .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 18px; align-items: end; }
+  .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 18px; align-items: end; }
   .field label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
-  .field select, .field input[type="date"] { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 14px; }
-  .field select:focus, .field input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  /* ---- Modern date picker ---- */
+  .date-field { position: relative; }
+  .date-field input[type="date"] {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--paper); color: var(--ink); font-family: 'IBM Plex Mono', monospace; font-size: 14px;
+    appearance: none; -webkit-appearance: none;
+  }
+  .date-field input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(38%) sepia(45%) saturate(600%) hue-rotate(350deg) brightness(95%);
+    cursor: pointer; padding: 2px;
+  }
+  .date-field input[type="date"]:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  /* ---- Custom dropdown (single & multi select) ---- */
+  .dd { position: relative; }
+  .dd-toggle {
+    width: 100%; text-align:left; padding: 10px 34px 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 14px; cursor: pointer;
+    position: relative; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dd-toggle::after {
+    content: ''; position: absolute; right: 12px; top: 50%; width: 8px; height: 8px;
+    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+    transform: translateY(-70%) rotate(45deg); transition: transform 0.15s;
+  }
+  .dd.open .dd-toggle::after { transform: translateY(-30%) rotate(-135deg); }
+  .dd-toggle:focus-visible, .dd-toggle:hover { outline: 2px solid var(--amber); outline-offset: 1px; }
+  .dd-panel {
+    display:none; position:absolute; top: calc(100% + 6px); left:0; right:0; z-index: 40;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 10px 28px rgba(20,20,15,0.16); overflow: hidden;
+  }
+  .dd.open .dd-panel { display:block; }
+  .dd-search { border-bottom: 1px solid var(--line); padding: 8px; }
+  .dd-search input { width:100%; padding: 8px 10px; border:1px solid var(--line); border-radius:4px; font-family:'Inter',sans-serif; font-size:13px; }
+  .dd-search input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+  .dd-list { max-height: 240px; overflow-y: auto; }
+  .dd-option { display:flex; align-items:center; gap:9px; padding: 9px 12px; font-size: 13.5px; cursor:pointer; }
+  .dd-option:hover { background: #FBF9F4; }
+  .dd-option.all { border-bottom: 1px solid var(--line); font-weight: 600; }
+  .dd-option input[type="checkbox"], .dd-option .radio-dot { accent-color: var(--amber); flex-shrink:0; }
+  .dd-option .radio-dot { width:14px; height:14px; border-radius:50%; border:1.5px solid var(--muted); display:inline-block; position:relative; }
+  .dd-option.selected .radio-dot { border-color: var(--amber); }
+  .dd-option.selected .radio-dot::after { content:''; position:absolute; inset:2.5px; border-radius:50%; background:var(--amber); }
+  .dd-empty { padding: 14px 12px; color: var(--muted); font-size: 13px; }
 
   .report-toggle { display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
   .report-toggle button { flex: 1; padding: 10px 8px; border: none; background: var(--paper); color: var(--muted); font-family: 'Inter', sans-serif; font-weight: 600; font-size: 12.5px; cursor: pointer; }
   .report-toggle button.active { background: var(--ink); color: var(--paper); }
   .report-toggle button:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
 
-  .actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+  .actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; align-items:center; }
   button.primary, button.secondary { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 14px; padding: 11px 20px; border-radius: var(--radius); cursor: pointer; border: 1px solid transparent; }
   button.primary { background: var(--amber); color: var(--ink); border-color: var(--amber); }
   button.primary:hover { background: var(--amber-dark); }
@@ -72,16 +135,21 @@
   button.secondary { background: transparent; color: var(--ink); border-color: var(--ink); }
   button.secondary:hover { background: var(--ink); color: var(--paper); }
   button.secondary:disabled { opacity: 0.4; cursor: not-allowed; }
-  button.header-btn { background: transparent; color: var(--paper); border-color: var(--paper); }
+  button.header-btn { background: transparent; color: var(--paper); border-color: var(--paper); font-size:12.5px; padding: 8px 16px; }
   button.header-btn:hover { background: var(--paper); color: var(--ink); }
   button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 
   .status-line { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); margin: 14px 0 0; }
   .status-line.error { color: var(--danger); }
 
-  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+  /* ---- Barcode search module ---- */
+  .search-row { display:flex; gap:10px; }
+  .search-row input { flex:1; padding: 11px 14px; border:1px solid var(--line); border-radius: var(--radius); font-family:'IBM Plex Mono', monospace; font-size: 14px; background: var(--paper); }
+  .search-row input:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); max-height: 560px; }
   table { border-collapse: collapse; width: 100%; min-width: 900px; }
-  thead th { text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); background: var(--paper); border-bottom: 2px solid var(--ink); padding: 10px 12px; white-space: nowrap; position: sticky; top: 0; }
+  thead th { text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); background: var(--paper); border-bottom: 2px solid var(--ink); padding: 10px 12px; white-space: nowrap; position: sticky; top: 0; z-index: 5; }
   thead th.num { text-align: right; }
   tbody td { padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; white-space: nowrap; }
   tbody td.num { text-align: right; font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; }
@@ -94,8 +162,9 @@
   footer { text-align: center; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; padding: 28px 16px 40px; }
 
   @media print {
-    header, .panel .filters, .actions, footer, .barcode-stripe { display: none !important; }
+    header, .panel .filters, .actions, footer, .barcode-stripe, #searchPanel { display: none !important; }
     .panel { border: none; padding: 0; }
+    .table-wrap { max-height: none; overflow: visible; }
     body { background: white; }
   }
 
@@ -132,10 +201,13 @@
     <p class="eyebrow">Inventory Reporting</p>
     <h1>Stock Report</h1>
   </div>
-  <div style="display:flex; align-items:center; gap:16px;">
-    <div id="lastUpdated">Checking last sync…</div>
-    <button type="button" class="secondary header-btn" id="btnRefreshSync" style="padding:6px 14px; font-size:12px;">Refresh</button>
-    <button type="button" class="secondary header-btn" id="btnLogout" style="padding:6px 14px; font-size:12px;">Sign out</button>
+  <div class="header-right">
+    <div class="sync-panel">
+      <span class="sync-pill neutral" id="syncPill"><span class="dot"></span><span id="syncPillText">Checking…</span></span>
+      <span class="sync-meta" id="syncMeta">Last update: —</span>
+    </div>
+    <button type="button" class="secondary header-btn" id="btnRefreshSync">Sync / Reload</button>
+    <button type="button" class="secondary header-btn" id="btnLogout">Sign out</button>
   </div>
 </header>
 <div class="barcode-stripe" id="stripe"></div>
@@ -143,16 +215,24 @@
 <main>
   <section class="panel">
     <div class="filters">
-      <div class="field">
+      <div class="field date-field">
         <label for="asOfDate">Stock as of date</label>
         <input type="date" id="asOfDate">
       </div>
 
       <div class="field">
-        <label for="storeSelect">Select store</label>
-        <select id="storeSelect">
-          <option value="">All stores</option>
-        </select>
+        <label id="storeLabel">Select store</label>
+        <div class="dd" id="ddStore"></div>
+      </div>
+
+      <div class="field">
+        <label id="categoryLabel">Category</label>
+        <div class="dd" id="ddCategory"></div>
+      </div>
+
+      <div class="field">
+        <label id="subCategoryLabel">Sub-Category</label>
+        <div class="dd" id="ddSubCategory"></div>
       </div>
 
       <div class="field">
@@ -163,15 +243,32 @@
           <button type="button" id="btnSaleBarcode">Sale_Barcode Wise</button>
         </div>
       </div>
+
+      <div class="field">
+        <label>Print type</label>
+        <div class="report-toggle" role="group" aria-label="Print type">
+          <button type="button" id="btnPrintTypeExcel" class="active">Excel</button>
+          <button type="button" id="btnPrintTypePdf">PDF View</button>
+        </div>
+      </div>
     </div>
 
     <div class="actions">
       <button type="button" class="primary" id="btnGenerate">Generate report</button>
-      <button type="button" class="secondary" id="btnExport" disabled>Download Excel</button>
-      <button type="button" class="secondary" id="btnPrint" disabled>Print / Save PDF</button>
+      <button type="button" class="secondary" id="btnExport" disabled>Export</button>
     </div>
 
     <p class="status-line" id="statusLine">Pick a date and store, then generate a report.</p>
+  </section>
+
+  <section class="panel" id="searchPanel">
+    <h2>Barcode search</h2>
+    <div class="search-row">
+      <input type="text" id="barcodeSearch" placeholder="Search by Barcode, Sale Barcode, or User Barcode…">
+      <button type="button" class="secondary" id="btnSearchClear">Clear</button>
+    </div>
+    <p class="status-line" id="searchStatusLine"></p>
+    <div id="searchResultsArea"></div>
   </section>
 
   <section class="panel" style="padding:0; overflow:hidden;">
@@ -183,8 +280,6 @@
     </div>
   </section>
 </main>
-
-<footer>Data refreshes automatically every 30 minutes from the ERP sync job.</footer>
 
 </div><!-- /#appContent -->
 
@@ -198,8 +293,6 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
-    // sessionStorage (unlike the default localStorage) is wiped automatically
-    // when the tab or browser closes, so the user is logged out on reopening.
     storage: window.sessionStorage,
     persistSession: true,
     autoRefreshToken: true,
@@ -230,11 +323,11 @@ function showApp() {
   loginEls.screen.style.display = 'none';
   loginEls.app.style.display = 'block';
   loadStores();
-  loadLastUpdated();
+  loadCategories();
+  loadSyncStatus();
 }
 
-// ---- Manual "Refresh" button: triggers the sync service using this user's
-// own login session (no shared secret needed in this public front-end code) ----
+// ---- Sync / Reload button + sync info panel ----
 const SYNC_TRIGGER_URL = 'https://inventory-sync-service.onrender.com/trigger-sync';
 const SYNC_STATUS_URL = 'https://inventory-sync-service.onrender.com/sync-status';
 
@@ -245,35 +338,32 @@ document.getElementById('btnRefreshSync').addEventListener('click', async () => 
 
   try {
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) { showToast('You need to be signed in to refresh.', 'error'); btn.disabled = false; btn.textContent = 'Refresh'; return; }
+    if (!session) { showToast('You need to be signed in to sync.', 'error'); btn.disabled = false; btn.textContent = 'Sync / Reload'; return; }
 
     const resp = await fetch(SYNC_TRIGGER_URL, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
 
-    // 202 = GitHub accepted the trigger and queued/started the run.
     if (resp.status !== 202) {
       const text = await resp.text();
       showToast('Could not start sync — check with your admin.', 'error');
       console.error('Sync start failure detail:', text);
       btn.disabled = false;
-      btn.textContent = 'Refresh';
+      btn.textContent = 'Sync / Reload';
       return;
     }
 
     showToast('Sync running in the background — this can take a few minutes…', 'success', 4000);
     btn.textContent = 'Syncing…';
+    setSyncPill('syncing');
     await pollSyncStatus(btn);
   } catch (err) {
     showToast('Could not reach the sync service: ' + err.message, 'error');
     btn.disabled = false;
-    btn.textContent = 'Refresh';
+    btn.textContent = 'Sync / Reload';
   }
 });
 
-// Checks /sync/status every few seconds until the background sync finishes,
-// then shows the real result. Gives up after 10 minutes as a safety net so
-// the button never gets stuck forever if something goes wrong silently.
 async function pollSyncStatus(btn) {
   const maxWaitMs = 10 * 60 * 1000;
   const intervalMs = 4000;
@@ -287,27 +377,70 @@ async function pollSyncStatus(btn) {
       const resp = await fetch(SYNC_STATUS_URL);
       status = await resp.json();
     } catch {
-      continue; // a single failed status check isn't fatal — just try again next tick
+      continue;
     }
 
     if (!status.isRunning) {
+      applySyncStatus(status);
       if (status.lastSuccess === true) {
         showToast('Sync completed successfully — data is up to date.', 'success');
       } else {
         showToast('Sync finished with errors — no data was changed. Check the Actions tab on GitHub for details.', 'error');
       }
       btn.disabled = false;
-      btn.textContent = 'Refresh';
-      loadLastUpdated();
+      btn.textContent = 'Sync / Reload';
       return;
     }
   }
 
-  // Timed out waiting — the sync may still finish on its own; the "Data last
-  // updated" indicator will reflect it once it does.
   showToast('Still running — check back in a bit. This will finish on its own.', 'error');
   btn.disabled = false;
-  btn.textContent = 'Refresh';
+  btn.textContent = 'Sync / Reload';
+}
+
+async function loadSyncStatus() {
+  try {
+    const resp = await fetch(SYNC_STATUS_URL);
+    const status = await resp.json();
+    applySyncStatus(status);
+  } catch {
+    setSyncPill('neutral', 'Status unavailable');
+  }
+}
+setInterval(loadSyncStatus, 60000);
+
+function applySyncStatus(status) {
+  const meta = document.getElementById('syncMeta');
+  if (status.isRunning) {
+    setSyncPill('syncing');
+  } else if (status.lastSuccess === true) {
+    setSyncPill('success', 'Successful');
+  } else if (status.lastSuccess === false) {
+    setSyncPill('error', 'Error');
+  } else {
+    setSyncPill('neutral', 'No sync yet');
+  }
+  meta.innerHTML = status.lastFinishedAt
+    ? `Last update: <strong>${formatSyncDate(new Date(status.lastFinishedAt))}</strong>`
+    : 'Last update: —';
+}
+
+function setSyncPill(kind, label) {
+  const pill = document.getElementById('syncPill');
+  const text = document.getElementById('syncPillText');
+  pill.className = 'sync-pill ' + (kind === 'syncing' ? 'neutral syncing' : kind);
+  text.textContent = kind === 'syncing' ? 'Syncing…' : (label || '');
+}
+
+function formatSyncDate(d) {
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = d.toLocaleString('en-US', { month: 'short' });
+  const year = String(d.getFullYear()).slice(-2);
+  let hours = d.getHours();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12; if (hours === 0) hours = 12;
+  const mins = String(d.getMinutes()).padStart(2, '0');
+  return `${day}-${month}-${year} | ${String(hours).padStart(2, '0')}:${mins} ${ampm}`;
 }
 
 function showToast(message, type, durationMs = 5000) {
@@ -345,22 +478,141 @@ document.getElementById('btnLogout').addEventListener('click', async () => {
 
 checkAuth();
 
+// ============================================================================
+// CUSTOM DROPDOWN COMPONENT — used for Store (single-select) and
+// Category / Sub-Category (multi-select). Opens below, searchable.
+// ============================================================================
+function createDropdown({ mountEl, placeholder, allLabel, multi }) {
+  let options = [];      // [{value, label}]
+  let selected = multi ? [] : null; // array of values (multi) or single value/null (single = "all")
+  let onChangeCb = () => {};
+
+  mountEl.innerHTML = `
+    <button type="button" class="dd-toggle">${placeholder}</button>
+    <div class="dd-panel">
+      <div class="dd-search"><input type="text" placeholder="Search…"></div>
+      <div class="dd-list"></div>
+    </div>
+  `;
+  const toggle = mountEl.querySelector('.dd-toggle');
+  const panel = mountEl.querySelector('.dd-panel');
+  const searchInput = mountEl.querySelector('.dd-search input');
+  const list = mountEl.querySelector('.dd-list');
+
+  toggle.addEventListener('click', () => {
+    const isOpen = mountEl.classList.contains('open');
+    closeAllDropdowns();
+    if (!isOpen) { mountEl.classList.add('open'); searchInput.value = ''; renderList(); searchInput.focus(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mountEl.classList.contains('open')) mountEl.classList.remove('open');
+  });
+
+  searchInput.addEventListener('input', renderList);
+
+  function renderList() {
+    const q = searchInput.value.trim().toLowerCase();
+    const filtered = q ? options.filter(o => o.label.toLowerCase().includes(q)) : options;
+
+    let html = `<div class="dd-option all ${(multi ? selected.length === 0 : selected === null) ? 'selected' : ''}" data-all="1">
+      ${multi ? '<input type="checkbox">' : '<span class="radio-dot"></span>'}<span>${allLabel}</span></div>`;
+
+    if (filtered.length === 0) {
+      html += `<div class="dd-empty">No matches.</div>`;
+    } else {
+      for (const o of filtered) {
+        const isSel = multi ? selected.includes(o.value) : selected === o.value;
+        html += `<div class="dd-option ${isSel ? 'selected' : ''}" data-value="${o.value}">
+          ${multi ? `<input type="checkbox" ${isSel ? 'checked' : ''}>` : `<span class="radio-dot"></span>`}<span>${o.label}</span></div>`;
+      }
+    }
+    list.innerHTML = html;
+
+    list.querySelectorAll('.dd-option').forEach(row => {
+      row.addEventListener('click', () => {
+        if (row.dataset.all) {
+          selected = multi ? [] : null;
+        } else if (multi) {
+          const v = row.dataset.value;
+          selected = selected.includes(v) ? selected.filter(x => x !== v) : [...selected, v];
+        } else {
+          selected = row.dataset.value;
+          mountEl.classList.remove('open');
+        }
+        updateToggleLabel();
+        renderList();
+        onChangeCb();
+      });
+    });
+  }
+
+  function updateToggleLabel() {
+    if (multi) {
+      toggle.textContent = selected.length === 0 ? allLabel : (selected.length === 1 ? selected[0] : `${selected.length} selected`);
+    } else {
+      const found = options.find(o => o.value === selected);
+      toggle.textContent = selected === null ? allLabel : (found ? found.label : selected);
+    }
+  }
+
+  return {
+    setOptions(opts) { options = opts; renderList(); },
+    getValue() { return multi ? (selected.length ? selected : null) : selected; },
+    onChange(cb) { onChangeCb = cb; },
+    reset() { selected = multi ? [] : null; updateToggleLabel(); renderList(); },
+  };
+}
+
+function closeAllDropdowns() {
+  document.querySelectorAll('.dd.open').forEach(el => el.classList.remove('open'));
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.dd')) closeAllDropdowns();
+});
+
+const storeDropdown = createDropdown({ mountEl: document.getElementById('ddStore'), placeholder: 'All stores', allLabel: 'All stores', multi: false });
+const categoryDropdown = createDropdown({ mountEl: document.getElementById('ddCategory'), placeholder: 'All categories', allLabel: 'All categories', multi: true });
+const subCategoryDropdown = createDropdown({ mountEl: document.getElementById('ddSubCategory'), placeholder: 'All sub-categories', allLabel: 'All sub-categories', multi: true });
+
+// ---- Store list ----
+async function loadStores() {
+  const { data, error } = await supabase.from('store').select('store_code, store_name').order('store_name');
+  if (error) { setStatus('Could not load the store list: ' + error.message, true); return; }
+  storeDropdown.setOptions((data || []).map(s => ({ value: s.store_code, label: s.store_name })));
+}
+
+// ---- Category / Sub-Category lists ----
+async function loadCategories() {
+  const [catRes, subRes] = await Promise.all([
+    supabase.rpc('get_distinct_categories'),
+    supabase.rpc('get_distinct_sub_categories'),
+  ]);
+  if (!catRes.error) categoryDropdown.setOptions((catRes.data || []).map(c => ({ value: c.category, label: c.category })));
+  if (!subRes.error) subCategoryDropdown.setOptions((subRes.data || []).map(c => ({ value: c.sub_category, label: c.sub_category })));
+}
+
 let reportType = 'store'; // 'store' | 'barcode' | 'sale_barcode'
+let printType = 'excel';  // 'excel' | 'pdf'
 let currentRows = [];
+let currentSheetLabel = 'Report';
+let currentIsSaleBarcodeShaped = false; // controls which column set Export uses
 
 const els = {
   date: document.getElementById('asOfDate'),
-  store: document.getElementById('storeSelect'),
   btnStore: document.getElementById('btnStore'),
   btnBarcode: document.getElementById('btnBarcode'),
   btnSaleBarcode: document.getElementById('btnSaleBarcode'),
+  btnPrintTypeExcel: document.getElementById('btnPrintTypeExcel'),
+  btnPrintTypePdf: document.getElementById('btnPrintTypePdf'),
   btnGenerate: document.getElementById('btnGenerate'),
   btnExport: document.getElementById('btnExport'),
-  btnPrint: document.getElementById('btnPrint'),
   status: document.getElementById('statusLine'),
   results: document.getElementById('resultsArea'),
   stripe: document.getElementById('stripe'),
-  lastUpdated: document.getElementById('lastUpdated'),
+  search: document.getElementById('barcodeSearch'),
+  searchStatus: document.getElementById('searchStatusLine'),
+  searchResults: document.getElementById('searchResultsArea'),
 };
 
 els.date.value = new Date().toISOString().slice(0, 10);
@@ -376,36 +628,15 @@ function setReportType(type) {
   els.btnSaleBarcode.classList.toggle('active', type === 'sale_barcode');
 }
 
-// ---- Store list ----
-async function loadStores() {
-  const { data, error } = await supabase.from('store').select('store_code, store_name').order('store_name');
-  if (error) { setStatus('Could not load the store list: ' + error.message, true); return; }
-  for (const s of data) {
-    const opt = document.createElement('option');
-    opt.value = s.store_code;
-    opt.textContent = s.store_name;
-    els.store.appendChild(opt);
-  }
+// ---- Print type toggle ----
+els.btnPrintTypeExcel.addEventListener('click', () => setPrintType('excel'));
+els.btnPrintTypePdf.addEventListener('click', () => setPrintType('pdf'));
+function setPrintType(type) {
+  printType = type;
+  els.btnPrintTypeExcel.classList.toggle('active', type === 'excel');
+  els.btnPrintTypePdf.classList.toggle('active', type === 'pdf');
+  els.btnExport.textContent = type === 'excel' ? 'Export' : 'Print / Save PDF';
 }
-
-// ---- "Data last updated" indicator, refreshed periodically ----
-async function loadLastUpdated() {
-  const { data, error } = await supabase
-    .from('sync_log')
-    .select('last_synced_at')
-    .order('last_synced_at', { ascending: true })
-    .limit(1);
-
-  if (error || !data || !data.length || !data[0].last_synced_at) {
-    els.lastUpdated.textContent = 'Sync status unavailable';
-    return;
-  }
-  const dt = new Date(data[0].last_synced_at);
-  const mins = Math.round((Date.now() - dt.getTime()) / 60000);
-  const label = mins < 1 ? 'just now' : mins === 1 ? '1 minute ago' : `${mins} minutes ago`;
-  els.lastUpdated.innerHTML = `Data last updated: <strong>${label}</strong>`;
-}
-setInterval(loadLastUpdated, 60000);
 
 // ---- Generate report ----
 els.btnGenerate.addEventListener('click', generateReport);
@@ -413,56 +644,96 @@ els.btnGenerate.addEventListener('click', generateReport);
 async function generateReport() {
   const asOfDate = els.date.value;
   if (!asOfDate) { setStatus('Pick a date first.', true); return; }
-  const storeCode = els.store.value || null;
+  const storeCode = storeDropdown.getValue();
+  const categories = categoryDropdown.getValue();
+  const subCategories = subCategoryDropdown.getValue();
 
   setLoading(true);
   setStatus('Running report…');
   els.btnExport.disabled = true;
-  els.btnPrint.disabled = true;
 
   const fnMap = {
     store: 'get_store_wise_report',
     barcode: 'get_barcode_wise_report',
     sale_barcode: 'get_sale_barcode_wise_report',
   };
-  const { data, error } = await supabase.rpc(fnMap[reportType], {
-    as_of_date: asOfDate,
-    p_store_code: storeCode,
-  });
+  const params = { as_of_date: asOfDate, p_store_code: storeCode, p_category: categories, p_sub_category: subCategories };
+  if (reportType === 'sale_barcode') params.p_search = null;
+
+  const { data, error } = await supabase.rpc(fnMap[reportType], params);
 
   setLoading(false);
 
   if (error) {
     setStatus('Report failed: ' + error.message, true);
-    renderEmpty('Report failed', error.message);
+    renderInto(els.results, null, 'Report failed', error.message);
     return;
   }
 
   currentRows = data || [];
+  currentIsSaleBarcodeShaped = reportType === 'sale_barcode';
+  currentSheetLabel = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' }[reportType];
+
   if (currentRows.length === 0) {
     setStatus(`No stock found for ${asOfDate}.`);
-    renderEmpty('Nothing to show', 'No stock movement found for this date and store.');
+    renderInto(els.results, null, 'Nothing to show', 'No stock movement found for this date and store.');
+    els.btnExport.disabled = true;
     return;
   }
 
   setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
-  if (reportType === 'store') {
-    renderTable(currentRows);
-    els.btnPrint.disabled = false;
-  } else {
-    // Barcode Wise and Sale_Barcode Wise can return a very large number of
-    // rows — rendering all of them as an HTML table would be slow and
-    // impractical. The data is still fully available in memory for Download
-    // Excel; there's just nothing sensible to print, so that button stays
-    // disabled for these two report types.
-    renderReady(currentRows.length, asOfDate);
-    els.btnPrint.disabled = true;
+  renderInto(els.results, getColumns(reportType), null, null, currentRows);
+  els.btnExport.disabled = false;
+}
+
+// ---- Independent Barcode Search module ----
+let searchDebounce = null;
+els.search.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(runBarcodeSearch, 350);
+});
+els.search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchDebounce); runBarcodeSearch(); } });
+document.getElementById('btnSearchClear').addEventListener('click', () => {
+  els.search.value = '';
+  els.searchStatus.textContent = '';
+  renderInto(els.searchResults, null, null, null, []);
+});
+
+async function runBarcodeSearch() {
+  const term = els.search.value.trim();
+  if (!term) { renderInto(els.searchResults, null, null, null, []); els.searchStatus.textContent = ''; return; }
+
+  const asOfDate = els.date.value || new Date().toISOString().slice(0, 10);
+  const storeCode = storeDropdown.getValue();
+
+  els.searchStatus.textContent = 'Searching…';
+  const { data, error } = await supabase.rpc('get_sale_barcode_wise_report', {
+    as_of_date: asOfDate, p_store_code: storeCode, p_category: null, p_sub_category: null, p_search: term,
+  });
+
+  if (error) { els.searchStatus.textContent = 'Search failed: ' + error.message; return; }
+
+  const rows = data || [];
+  if (rows.length === 0) {
+    els.searchStatus.textContent = `No matches for "${term}".`;
+    renderInto(els.searchResults, null, 'No matches', `Nothing found for "${term}".`);
+    return;
   }
+
+  els.searchStatus.textContent = `${rows.length} match${rows.length === 1 ? '' : 'es'} for "${term}".`;
+  renderInto(els.searchResults, getColumns('sale_barcode'), null, null, rows);
+
+  // Search results become the active export/print target, so Export always
+  // acts on whichever grid the user looked at most recently.
+  currentRows = rows;
+  currentIsSaleBarcodeShaped = true;
+  currentSheetLabel = 'Barcode Search';
   els.btnExport.disabled = false;
 }
 
 // ---- Column definitions per report type ----
-function getColumns() {
+function getColumns(type) {
+  const dateCol = [['report_date', 'Date', false]];
   const qtyCols = [
     ['opening_stock_qty', 'Opening Qty', true], ['on_hand_stock_qty', 'On Hand Qty', true],
     ['pending_stock_qty', 'Pending Qty', true], ['gross_stock_qty', 'Gross Qty', true],
@@ -474,23 +745,22 @@ function getColumns() {
     ['pending_sal_value', 'Pending Sale Value', true], ['gross_sal_value', 'Gross Sale Value', true],
   ];
 
-  if (reportType === 'store') {
-    return [['store_name', 'Store', false], ...qtyCols];
+  if (type === 'store') {
+    return [['store_name', 'Store', false], ...qtyCols, ...valueCols];
   }
-  const itemCols = [
-    ['store_name', 'Store', false], ['barcode', 'Barcode', false],
-  ];
-  if (reportType === 'sale_barcode') itemCols.push(['sal_barcode', 'Sal Barcode', false]);
-  itemCols.push(
-    ['user_barcode', 'User Barcode', false], ['category', 'Category', false], ['sub_category', 'Sub-Category', false],
-    ['item_name', 'Item Name', false],
-  );
-  if (reportType === 'sale_barcode') itemCols.push(['cpu', 'CPU', true], ['mrp', 'MRP', true]);
+  const itemCols = [...dateCol, ['store_name', 'Store', false], ['barcode', 'Barcode', false]];
+  if (type === 'sale_barcode') itemCols.push(['sal_barcode', 'Sal Barcode', false]);
+  itemCols.push(['user_barcode', 'User Barcode', false], ['category', 'Category', false], ['sub_category', 'Sub-Category', false], ['item_name', 'Item Name', false]);
+  if (type === 'sale_barcode') itemCols.push(['cpu', 'CPU', true], ['mrp', 'MRP', true]);
   return [...itemCols, ...qtyCols, ...valueCols, ['stock_age_days', 'Stock Age (Days)', true]];
 }
 
-function renderTable(rows) {
-  const columns = getColumns();
+function renderInto(container, columns, headline, detail, rows) {
+  if (headline) {
+    container.innerHTML = `<div class="empty-state"><div class="headline">${headline}</div><div>${detail}</div></div>`;
+    return;
+  }
+  if (!rows || rows.length === 0) { container.innerHTML = ''; return; }
   let html = '<div class="table-wrap"><table><thead><tr>';
   for (const [, label, isNum] of columns) html += `<th class="${isNum ? 'num' : ''}">${label}</th>`;
   html += '</tr></thead><tbody>';
@@ -503,18 +773,7 @@ function renderTable(rows) {
     html += '</tr>';
   }
   html += '</tbody></table></div>';
-  els.results.innerHTML = html;
-}
-
-function renderReady(rowCount, asOfDate) {
-  els.results.innerHTML = `<div class="empty-state">
-    <div class="headline">Report ready</div>
-    <div>${rowCount} row${rowCount === 1 ? '' : 's'} generated as of ${asOfDate}. Use Download Excel to get the full data.</div>
-  </div>`;
-}
-
-function renderEmpty(headline, detail) {
-  els.results.innerHTML = `<div class="empty-state"><div class="headline">${headline}</div><div>${detail}</div></div>`;
+  container.innerHTML = html;
 }
 
 function formatNumber(val) {
@@ -534,20 +793,19 @@ function setLoading(isLoading) {
   els.stripe.classList.toggle('loading', isLoading);
 }
 
-// ---- Excel export ----
+// ---- Export (Excel) / Print (PDF view), driven by the Print Type toggle ----
 els.btnExport.addEventListener('click', () => {
   if (currentRows.length === 0) return;
+  if (printType === 'pdf') {
+    window.print();
+    return;
+  }
   const ws = XLSX.utils.json_to_sheet(currentRows);
   const wb = XLSX.utils.book_new();
-  const sheetNames = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' };
-  const sheetName = sheetNames[reportType];
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  const storeLabel = els.store.value ? els.store.options[els.store.selectedIndex].text.replace(/\s+/g, '_') : 'AllStores';
-  XLSX.writeFile(wb, `StockReport_${sheetName.replace(/\s|_/g, '')}_${storeLabel}_${els.date.value}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, ws, currentSheetLabel.slice(0, 31));
+  const storeLabel = storeDropdown.getValue() || 'AllStores';
+  XLSX.writeFile(wb, `StockReport_${currentSheetLabel.replace(/\s|_/g, '')}_${storeLabel}_${els.date.value}.xlsx`);
 });
-
-// ---- Print / Save as PDF (browser-native, no extra library needed) ----
-els.btnPrint.addEventListener('click', () => window.print());
 })();
 </script>
 
