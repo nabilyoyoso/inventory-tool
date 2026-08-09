@@ -23,6 +23,7 @@
     --void: #08201D;
     --panel: #0F2E29;
     --panel-solid: #123530;
+    --panel-header: #0A211D;
     --glass-fill: rgba(255,255,255,0.05);
     --glass-fill-strong: rgba(255,255,255,0.10);
     --glass-border: rgba(255,255,255,0.14);
@@ -69,27 +70,29 @@
     border: 1px solid var(--glass-border);
   }
 
-  .barcode-stripe {
-    height: 10px; width: 100%;
-    background-image: repeating-linear-gradient(90deg,
-      var(--mint) 0px, var(--mint) 2px, transparent 2px, transparent 5px,
-      var(--mint) 5px, var(--mint) 6px, transparent 6px, transparent 11px,
-      var(--mint) 11px, var(--mint) 14px, transparent 14px, transparent 17px);
-    opacity: 0.55;
-  }
-  .barcode-stripe.loading { animation: stripe-scan 1.1s linear infinite; background-size: 200% 100%; opacity: 0.9; }
-  @keyframes stripe-scan { 0% { background-position: 0% 0; } 100% { background-position: -60px 0; } }
-  @media (prefers-reduced-motion: reduce) { .barcode-stripe.loading { animation: none; } .sparkle { animation: none !important; } }
+  @media (prefers-reduced-motion: reduce) { .sparkle { animation: none !important; } }
 
   header {
-    background: linear-gradient(180deg, rgba(15,46,41,0.9), rgba(8,32,29,0.9));
+    background: linear-gradient(180deg, #0A2723 0%, #061917 100%);
     backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--line);
-    color: var(--ink); padding: 20px clamp(16px, 4vw, 48px) 16px;
+    box-shadow: 0 6px 18px -6px rgba(0,0,0,0.55);
+    color: var(--ink); padding: 20px clamp(16px, 4vw, 48px) 18px;
     display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;
+    position: relative; z-index: 10;
   }
-  header .eyebrow { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mint); margin: 0 0 6px; }
-  header h1 { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: clamp(20px, 4vw, 26px); letter-spacing: 0.01em; margin: 0; text-transform: uppercase; }
+  header .eyebrow {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 4px; order: 2;
+  }
+  header h1 {
+    font-family: 'Oswald', sans-serif; font-weight: 700; font-size: clamp(26px, 5vw, 38px);
+    letter-spacing: 0.01em; margin: 0; text-transform: uppercase; order: 1;
+    background: linear-gradient(180deg, #B9F5E4 0%, var(--mint) 45%, var(--cyan) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.45));
+  }
+  header > div:first-child { display: flex; flex-direction: column; }
 
   .header-right { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
 
@@ -122,14 +125,22 @@
   .field label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
 
   /* ---- Date picker ---- */
+  .date-field { position: relative; }
+  .date-field::after {
+    content: ''; position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+    width: 27px; height: 27px; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle at 34% 28%, rgba(255,255,255,0.6), rgba(255,255,255,0.05) 55%, transparent 70%),
+                rgba(74,222,148,0.16);
+    border: 1px solid rgba(74,222,148,0.35);
+  }
   .date-field input[type="date"] {
-    width: 100%; padding: 10px 12px; border: 1px solid var(--glass-border); border-radius: var(--radius);
+    width: 100%; padding: 10px 44px 10px 12px; border: 1px solid var(--glass-border); border-radius: var(--radius);
     background: var(--glass-fill); color: var(--ink); font-family: 'IBM Plex Mono', monospace; font-size: 14px;
-    appearance: none; -webkit-appearance: none; color-scheme: dark;
+    appearance: none; -webkit-appearance: none; color-scheme: dark; position: relative;
   }
   .date-field input[type="date"]::-webkit-calendar-picker-indicator {
-    filter: invert(80%) sepia(30%) saturate(500%) hue-rotate(80deg) brightness(1.1);
-    cursor: pointer; padding: 2px;
+    filter: invert(75%) sepia(55%) saturate(650%) hue-rotate(95deg) brightness(1.15) drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+    cursor: pointer; padding: 3px; width: 19px; height: 19px; position: relative; z-index: 2; opacity: 1;
   }
   .date-field input[type="date"]:focus { outline: 2px solid var(--mint); outline-offset: 1px; }
 
@@ -165,16 +176,31 @@
   .dd-empty { padding: 14px 12px; color: var(--muted); font-size: 13px; }
 
   .report-toggle { display: flex; border: 1px solid var(--glass-border); border-radius: var(--radius); overflow: hidden; }
-  .report-toggle button { flex: 1; padding: 10px 12px; border: none; background: transparent; color: var(--muted); font-family: 'Inter', sans-serif; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap; }
-  .report-toggle button.active { background: var(--mint); color: #06231A; }
+  .report-toggle button {
+    flex: 1; padding: 10px 12px; border: none; background: transparent; color: var(--muted);
+    font-family: 'Inter', sans-serif; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+  }
+  .report-toggle button:hover:not(.active) { background: rgba(255,255,255,0.06); color: var(--ink); }
+  .report-toggle button.active {
+    background: linear-gradient(180deg, #82F2C2 0%, #47D19A 45%, #2CA872 100%);
+    color: #06231A;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -7px 11px -7px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.3);
+  }
   .report-toggle button:focus-visible { outline: 2px solid var(--mint); outline-offset: -2px; }
 
   .actions-right { display:flex; gap: 14px; align-items:flex-end; flex-wrap: wrap; }
 
   button.primary, button.secondary { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 14px; padding: 11px 20px; border-radius: var(--radius); cursor: pointer; border: 1px solid transparent; }
-  button.primary { background: var(--mint); color: #06231A; border-color: var(--mint); }
-  button.primary:hover { background: var(--mint-dark); }
-  button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary {
+    background: linear-gradient(180deg, #82F2C2 0%, #47D19A 45%, #2CA872 100%);
+    color: #06231A; border-color: rgba(255,255,255,0.3);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -8px 12px -8px rgba(0,0,0,0.4), 0 3px 10px rgba(0,0,0,0.35);
+    transition: filter 0.15s, transform 0.05s;
+  }
+  button.primary:hover { filter: brightness(1.06); }
+  button.primary:active { transform: translateY(1px); box-shadow: inset 0 2px 5px rgba(0,0,0,0.45); }
+  button.primary:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
   button.secondary { background: var(--glass-fill); color: var(--ink); border-color: var(--glass-border); }
   button.secondary:hover { background: var(--glass-fill-strong); }
   button.secondary:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -190,8 +216,12 @@
   table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 900px; }
   thead th {
     text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
-    color: var(--muted); background: var(--panel-solid); border-bottom: 2px solid var(--mint);
-    padding: 10px 12px; white-space: normal; word-break: break-word; max-width: 140px; line-height: 1.3;
+    color: var(--muted); background: var(--panel-header); border-bottom: 2px solid var(--mint);
+    padding: 11px 12px; white-space: normal; word-break: normal; overflow-wrap: break-word; hyphens: none;
+    min-width: 92px; max-width: 150px; line-height: 1.35; vertical-align: bottom;
+    /* Cap headers at 3 lines max, regardless of label length, so grid height stays consistent. */
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    box-shadow: 0 3px 6px -2px rgba(0,0,0,0.5);
     position: sticky; top: 0; z-index: 5;
   }
   thead th.num { text-align: right; }
@@ -213,11 +243,10 @@
   /* ---- Frozen Store column (always column 1) ---- */
   th.frozen-col, td.frozen-col {
     position: sticky; left: 0;
-    background: var(--panel-solid) !important;
     box-shadow: 4px 0 8px -4px rgba(0,0,0,0.55);
   }
-  th.frozen-col { z-index: 7; }
-  td.frozen-col { z-index: 3; font-weight: 600; }
+  th.frozen-col { z-index: 7; background: var(--panel-header) !important; }
+  td.frozen-col { z-index: 3; font-weight: 600; background: var(--panel-solid) !important; }
   tbody tr:hover td.frozen-col { background: #16403A !important; }
 
   .empty-state, .initial-state { padding: 48px 24px; text-align: center; color: var(--muted); }
@@ -291,7 +320,7 @@
   .pdf-modal-frame { flex: 1; width: 100%; border: none; background: #4a4a4a; }
 
   @media print {
-    header, .panel .filters-row1, .panel .filters-row2, footer, .barcode-stripe { display: none !important; }
+    header, .panel .filters-row1, .panel .filters-row2, footer { display: none !important; }
     .panel { border: none; padding: 0; }
     .table-wrap { max-height: none; overflow: visible; }
     body { background: white; }
@@ -334,8 +363,8 @@
 
 <header>
   <div>
-    <p class="eyebrow">YOYOSO Inventory</p>
-    <h1>Stock Report</h1>
+    <h1>YOYOSO BD Inventory</h1>
+    <p class="eyebrow">Stock Report</p>
   </div>
   <div class="header-right">
     <div class="sync-panel">
@@ -345,8 +374,8 @@
     <button type="button" class="secondary header-btn" id="btnRefreshSync">Sync / Reload</button>
     <button type="button" class="secondary header-btn" id="btnLogout">Sign out</button>
   </div>
+  <div style="position:absolute; left:0; right:0; bottom:0; height:3px; background:linear-gradient(90deg, var(--mint), var(--cyan)); opacity:0.6;"></div>
 </header>
-<div class="barcode-stripe" id="stripe"></div>
 
 <main>
   <section class="panel">
@@ -708,7 +737,6 @@ const els = {
   btnExport: document.getElementById('btnExport'),
   status: document.getElementById('statusLine'),
   results: document.getElementById('resultsArea'),
-  stripe: document.getElementById('stripe'),
   search: document.getElementById('barcodeSearch'),
 };
 
@@ -873,7 +901,7 @@ function setStatus(msg, isError = false) {
 
 function setLoading(isLoading) {
   els.btnGenerate.disabled = isLoading;
-  els.stripe.classList.toggle('loading', isLoading);
+  els.btnGenerate.textContent = isLoading ? 'Generating…' : 'Generate report';
 }
 
 function storeLabelForFilename() {
