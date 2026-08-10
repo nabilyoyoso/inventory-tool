@@ -282,6 +282,19 @@
   tbody tr:hover td.col-value { background-color: rgba(217,164,65,0.11); }
   tbody tr:last-child td { border-bottom: none; }
 
+  /* ---- Grand total row (Store Wise grid only) ---- */
+  tfoot td {
+    padding: 11px 12px; font-size: 13px; font-weight: 700; color: var(--ink);
+    background: var(--panel-header); border-top: 2px solid var(--mint);
+    font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums;
+    position: sticky; bottom: 0; z-index: 4;
+  }
+  tfoot td.frozen-col { z-index: 8; background: var(--panel-header) !important; text-align: left; }
+  tfoot td.num { text-align: right; }
+  tfoot td.col-qty   { color: var(--cyan); }
+  tfoot td.col-cost  { color: var(--violet); }
+  tfoot td.col-value { color: var(--gold); }
+
   /* ---- Frozen Store column (always column 1) ---- */
   th.frozen-col, td.frozen-col {
     position: sticky; left: 0;
@@ -388,6 +401,48 @@
   .pdf-modal-header span { font-family:'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); }
   .pdf-modal-actions { display:flex; gap: 10px; }
   .pdf-modal-frame { flex: 1; width: 100%; border: none; background: #4a4a4a; }
+
+  /* ============================================================
+     REPORT-GENERATION LOADING OVERLAY
+     Full-screen lock shown while a report is generating. Stays up until
+     generateReport() explicitly hides it (success, empty result, or error) —
+     duration is never fixed/timed.
+     ============================================================ */
+  .loading-overlay {
+    position: fixed; inset: 0; z-index: 6000; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.88);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  }
+  .loading-overlay.active { display: flex; }
+  body.loading-locked { overflow: hidden; }
+
+  .loading-card {
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 34px 48px; border-radius: 26px;
+    background: rgba(255,255,255,0.6);
+    border: 1px solid rgba(255,255,255,0.95);
+    box-shadow: 0 30px 70px rgba(15,46,41,0.16), inset 0 1px 0 rgba(255,255,255,0.9);
+  }
+  .loading-card svg { width: 168px; height: auto; display: block; }
+  .loading-title {
+    font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 19px; letter-spacing: 0.03em;
+    text-transform: uppercase; color: var(--turquoise-ink); margin: 4px 0 0;
+  }
+  .loading-sub { font-family: 'Inter', sans-serif; font-size: 13px; color: #5C6E68; margin: 0; text-align: center; }
+
+  /* subtle idle bob so the character reads as "alive" even between strokes */
+  .writer-char { transform-box: fill-box; transform-origin: center; animation: writerBob 1.8s ease-in-out infinite; }
+  @keyframes writerBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+
+  /* the arm+pencil swings like a natural, continuous writing motion */
+  .writer-arm { transform-box: fill-box; transform-origin: 78% 78%; animation: writerSwing 0.55s ease-in-out infinite alternate; }
+  @keyframes writerSwing { 0% { transform: rotate(-10deg); } 100% { transform: rotate(8deg); } }
+
+  /* "marching ants" ink line under the pencil tip — reads as continuous
+     writing for as long as the overlay stays up, no fixed end point */
+  .writer-ink { stroke-dasharray: 5 7; animation: writerInk 0.7s linear infinite; }
+  @keyframes writerInk { to { stroke-dashoffset: -48; } }
 
   @media print {
     header, .panel .filters-row1, .panel .filters-row2, footer { display: none !important; }
@@ -540,6 +595,43 @@
       </div>
     </div>
     <iframe id="pdfModalFrame" class="pdf-modal-frame" title="PDF preview"></iframe>
+  </div>
+</div>
+
+<!-- ============================================================
+     REPORT-GENERATION LOADING OVERLAY
+     ============================================================ -->
+<div class="loading-overlay" id="loadingOverlay" role="alert" aria-live="assertive" aria-hidden="true">
+  <div class="loading-card">
+    <svg viewBox="0 0 200 160" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <!-- paper -->
+      <rect x="16" y="30" width="104" height="122" rx="8" fill="#FFFFFF" stroke="#DCE7E3" stroke-width="2"/>
+      <line x1="32" y1="60" x2="104" y2="60" stroke="#D2DFDB" stroke-width="3" stroke-linecap="round"/>
+      <line x1="32" y1="80" x2="104" y2="80" stroke="#D2DFDB" stroke-width="3" stroke-linecap="round"/>
+      <line x1="32" y1="100" x2="94" y2="100" stroke="#D2DFDB" stroke-width="3" stroke-linecap="round"/>
+      <line class="writer-ink" x1="32" y1="120" x2="88" y2="120" stroke="#2FAE72" stroke-width="3.2" stroke-linecap="round"/>
+
+      <!-- character -->
+      <g class="writer-char">
+        <ellipse cx="148" cy="132" rx="36" ry="26" fill="#4ADE94"/>
+        <circle cx="148" cy="80" r="30" fill="#FFD9AB"/>
+        <path d="M120 68 Q148 40 176 68" stroke="#6B4A2F" stroke-width="11" fill="none" stroke-linecap="round"/>
+        <circle cx="138" cy="79" r="3" fill="#2B2320"/>
+        <circle cx="158" cy="79" r="3" fill="#2B2320"/>
+        <path d="M137 92 Q148 99 159 92" stroke="#2B2320" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+
+        <g class="writer-arm">
+          <line x1="120" y1="110" x2="92" y2="121" stroke="#FFD9AB" stroke-width="9" stroke-linecap="round"/>
+          <g transform="translate(92,121) rotate(-32)">
+            <rect x="-4" y="-30" width="8" height="34" rx="2" fill="#F4B740"/>
+            <polygon points="-4,-30 4,-30 0,-40" fill="#3C2A1E"/>
+            <rect x="-4" y="1" width="8" height="6" fill="#EFE3CC"/>
+          </g>
+        </g>
+      </g>
+    </svg>
+    <p class="loading-title">Generating Report...</p>
+    <p class="loading-sub">Please wait while we prepare your report.</p>
   </div>
 </div>
 
@@ -856,55 +948,74 @@ async function generateReport() {
   const searchTerm = els.search.value.trim() || null;
 
   setLoading(true);
+  showLoadingOverlay();
   setStatus('Running report…');
   els.btnExport.disabled = true;
 
-  const fnMap = {
-    store: 'get_store_wise_report',
-    barcode: 'get_barcode_wise_report',
-    sale_barcode: 'get_sale_barcode_wise_report',
-  };
-  const params = {
-    as_of_date: asOfDate,
-    p_store_codes: storeCodes,
-    p_category: categories,
-    p_sub_category: subCategories,
-    p_search: searchTerm,
-  };
+  try {
+    const fnMap = {
+      store: 'get_store_wise_report',
+      barcode: 'get_barcode_wise_report',
+      sale_barcode: 'get_sale_barcode_wise_report',
+    };
+    const params = {
+      as_of_date: asOfDate,
+      p_store_codes: storeCodes,
+      p_category: categories,
+      p_sub_category: subCategories,
+      p_search: searchTerm,
+    };
 
-  const { data, error } = await supabase.rpc(fnMap[reportType], params);
-  setLoading(false);
+    const { data, error } = await supabase.rpc(fnMap[reportType], params);
 
-  if (error) {
-    setStatus('Report failed: ' + error.message, true);
-    renderInto(els.results, null, 'Report failed', error.message);
-    return;
+    if (error) {
+      setStatus('Report failed: ' + error.message, true);
+      renderInto(els.results, null, 'Report failed', error.message);
+      return;
+    }
+
+    currentRows = data || [];
+    currentColumns = getColumns(reportType);
+    currentSheetLabel = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' }[reportType];
+
+    if (currentRows.length === 0) {
+      setStatus(`No stock found for ${asOfDate}.`);
+      renderInto(els.results, null, 'Nothing to show', 'No stock movement found for these filters.');
+      els.btnExport.disabled = true;
+      return;
+    }
+
+    // Only Store Wise renders into the on-screen grid, with a grand-total
+    // row summing every numeric column. Barcode Wise and Sale_Barcode Wise
+    // are export/PDF-only: the data is fetched and held in
+    // currentRows/currentColumns exactly the same way, so Export and Preview
+    // PDF work immediately — they just never get painted into the table.
+    if (reportType === 'store') {
+      setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
+      renderInto(els.results, currentColumns, null, null, currentRows, { showGrandTotal: true });
+    } else {
+      setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} ready — as of ${asOfDate}. ${currentSheetLabel} isn't shown on screen; use Export or Preview PDF below.`);
+      renderInto(els.results, null, 'Report ready for export',
+        `${currentRows.length} row${currentRows.length === 1 ? '' : 's'} generated for ${currentSheetLabel}. This report type is export/PDF only — use the Export or Preview PDF button below.`);
+    }
+    els.btnExport.disabled = false;
+  } finally {
+    // Always runs — success, empty result, or thrown error — so the UI can
+    // never get stuck locked behind the loading overlay.
+    setLoading(false);
+    hideLoadingOverlay();
   }
+}
 
-  currentRows = data || [];
-  currentColumns = getColumns(reportType);
-  currentSheetLabel = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' }[reportType];
-
-  if (currentRows.length === 0) {
-    setStatus(`No stock found for ${asOfDate}.`);
-    renderInto(els.results, null, 'Nothing to show', 'No stock movement found for these filters.');
-    els.btnExport.disabled = true;
-    return;
-  }
-
-  // Only Store Wise renders into the on-screen grid. Barcode Wise and
-  // Sale_Barcode Wise are export/PDF-only: the data is fetched and held in
-  // currentRows/currentColumns exactly the same way, so Export and Preview
-  // PDF work immediately — they just never get painted into the table.
-  if (reportType === 'store') {
-    setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
-    renderInto(els.results, currentColumns, null, null, currentRows);
-  } else {
-    setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} ready — as of ${asOfDate}. ${currentSheetLabel} isn't shown on screen; use Export or Preview PDF below.`);
-    renderInto(els.results, null, 'Report ready for export',
-      `${currentRows.length} row${currentRows.length === 1 ? '' : 's'} generated for ${currentSheetLabel}. This report type is export/PDF only — use the Export or Preview PDF button below.`);
-  }
-  els.btnExport.disabled = false;
+function showLoadingOverlay() {
+  document.getElementById('loadingOverlay').classList.add('active');
+  document.getElementById('loadingOverlay').setAttribute('aria-hidden', 'false');
+  document.body.classList.add('loading-locked');
+}
+function hideLoadingOverlay() {
+  document.getElementById('loadingOverlay').classList.remove('active');
+  document.getElementById('loadingOverlay').setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('loading-locked');
 }
 
 // ---- Column definitions per report type ----
@@ -941,16 +1052,17 @@ function getColumns(type) {
     ];
   }
 
-  // sale_barcode
+  // sale_barcode — Barcode column intentionally omitted; Sal Barcode and
+  // User Barcode already identify the item without it.
   return [
-    storeCol, dateCol, ['barcode', 'Barcode', false, null], ['sal_barcode', 'Sal Barcode', false, null],
+    storeCol, dateCol, ['sal_barcode', 'Sal Barcode', false, null],
     ['user_barcode', 'User Barcode', false, null], ['category', 'Category', false, null], ['sub_category', 'Sub-Category', false, null],
     ['item_name', 'Item Name', false, null], ['cpu', 'CPU', true, null], ['mrp', 'MRP', true, null],
     ...qtyCols, ...costCols, ...valueCols, ['stock_age_days', 'Stock Age (Days)', true, null],
   ];
 }
 
-function renderInto(container, columns, headline, detail, rows) {
+function renderInto(container, columns, headline, detail, rows, opts = {}) {
   if (headline) {
     container.innerHTML = `<div class="empty-state"><div class="headline">${headline}</div><div>${detail}</div></div>`;
     return;
@@ -972,7 +1084,25 @@ function renderInto(container, columns, headline, detail, rows) {
     }
     html += '</tr>';
   }
-  html += '</tbody></table></div>';
+  html += '</tbody>';
+
+  if (opts.showGrandTotal) {
+    html += '<tfoot><tr>';
+    columns.forEach(([key, , isNum, group, frozen], idx) => {
+      const classes = [isNum ? 'num' : '', group ? `col-${group}` : '', frozen ? 'frozen-col' : ''].filter(Boolean).join(' ');
+      if (idx === 0) {
+        html += `<td class="${classes}">Grand Total</td>`;
+      } else if (isNum) {
+        const sum = rows.reduce((acc, r) => acc + (Number(r[key]) || 0), 0);
+        html += `<td class="${classes}">${formatNumber(sum)}</td>`;
+      } else {
+        html += `<td class="${classes}"></td>`;
+      }
+    });
+    html += '</tr></tfoot>';
+  }
+
+  html += '</table></div>';
   container.innerHTML = html;
 }
 
@@ -1024,11 +1154,31 @@ els.btnExport.addEventListener('click', () => {
 });
 
 // ---- Real in-app PDF preview (jsPDF + autotable), A4 landscape, auto-fit ----
+// Relative width weight per column, used to divide up the available page
+// width so every column of any report always fits on one page — no matter
+// how many columns that report has. Identifier/descriptive columns that
+// carry no transactional value (store, dates, codes, category, item name)
+// are weighted down relative to the numeric qty/cost/value columns, which
+// need enough room for figures like "12,345" without wrapping badly.
+function getPdfColumnWeight(key) {
+  const weights = {
+    store_name: 1.65, report_date: 0.85,
+    barcode: 1.05, sal_barcode: 1.05, user_barcode: 1.05,
+    category: 0.95, sub_category: 1.05, item_name: 1.7,
+    cpu: 0.75, mrp: 0.75, stock_age_days: 0.85,
+  };
+  if (weights[key] !== undefined) return weights[key];
+  if (key.includes('qty')) return 0.85;   // opening/on-hand/pending/gross qty
+  return 1.1;                             // cost/value columns
+}
+
 function buildPdfDoc(columns, rows, title, asOfDate) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = { top: 52, left: 18, right: 18, bottom: 24 };
+  const availableWidth = pageWidth - margin.left - margin.right;
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
@@ -1040,17 +1190,30 @@ function buildPdfDoc(columns, rows, title, asOfDate) {
   doc.setTextColor(100, 100, 100);
   doc.text(`${title}  |  As of ${asOfDate}  |  Generated ${new Date().toLocaleString()}`, 28, 40);
 
+  // Convert weights to actual point widths that sum to exactly the usable
+  // page width, so autoTable never needs to spill columns onto a second
+  // horizontal page — it only ever paginates rows (vertically).
+  const weights = columns.map(c => getPdfColumnWeight(c[0]));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const columnStyles = {};
+  columns.forEach((c, idx) => {
+    columnStyles[idx] = {
+      cellWidth: Math.max(22, (weights[idx] / totalWeight) * availableWidth),
+      halign: c[2] ? 'right' : 'left',
+    };
+  });
+  columnStyles[0].fontStyle = 'bold'; // Store column, matches the frozen column on screen
+
   doc.autoTable({
     startY: 52,
     head: [columns.map(c => c[1])],
     body: rows.map(r => columns.map(c => c[2] ? formatNumber(r[c[0]]) : (r[c[0]] ?? ''))),
-    styles: { font: 'helvetica', fontSize: 7, cellPadding: 4, overflow: 'linebreak', lineColor: [220, 220, 220], lineWidth: 0.4, textColor: [30, 30, 30] },
-    headStyles: { fillColor: [15, 46, 41], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 6.5 },
+    styles: { font: 'helvetica', fontSize: 7, cellPadding: 3.5, overflow: 'linebreak', lineColor: [220, 220, 220], lineWidth: 0.4, textColor: [30, 30, 30], valign: 'middle' },
+    headStyles: { fillColor: [15, 46, 41], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 6.5, halign: 'center', valign: 'middle' },
     alternateRowStyles: { fillColor: [244, 248, 247] },
-    columnStyles: { 0: { fontStyle: 'bold' } }, // Store column, matches the frozen column on screen
-    horizontalPageBreak: true,
-    horizontalPageBreakRepeat: 0, // repeat the Store column on every horizontal page — the PDF equivalent of "frozen"
-    margin: { top: 52, left: 20, right: 20, bottom: 24 },
+    columnStyles,
+    tableWidth: availableWidth,
+    margin,
     didDrawPage: () => {
       const info = doc.internal.getCurrentPageInfo();
       doc.setFontSize(8);
