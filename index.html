@@ -411,19 +411,23 @@
   .loading-overlay {
     position: fixed; inset: 0; z-index: 6000; display: none;
     align-items: center; justify-content: center;
-    /* one continuous glossy-matte white surface across the whole screen —
-       soft diffuse highlight top-left, gently deepening toward the edges,
-       instead of a flat sheet of white */
-    background:
-      radial-gradient(circle at 32% 22%, rgba(255,255,255,0.97), rgba(255,255,255,0.85) 42%, rgba(255,255,255,0.72) 100%);
-    backdrop-filter: blur(14px) saturate(115%); -webkit-backdrop-filter: blur(14px) saturate(115%);
+    /* light, glassy white wash over the whole screen — the dashboard stays
+       visible (blurred) behind it, it doesn't get whited out */
+    background: rgba(255,255,255,0.4);
+    backdrop-filter: blur(9px) saturate(115%); -webkit-backdrop-filter: blur(9px) saturate(115%);
   }
   .loading-overlay.active { display: flex; }
   body.loading-locked { overflow: hidden; }
 
   .loading-card {
     display: flex; flex-direction: column; align-items: center; gap: 14px;
-    padding: 20px;
+    padding: 34px 48px; border-radius: 26px;
+    /* frosted glass panel — translucent enough that the dashboard behind
+       it is genuinely visible through the blur, not just a solid white box */
+    background: rgba(255,255,255,0.38);
+    backdrop-filter: blur(20px) saturate(150%); -webkit-backdrop-filter: blur(20px) saturate(150%);
+    border: 1px solid rgba(255,255,255,0.65);
+    box-shadow: 0 30px 70px rgba(15,46,41,0.14), inset 0 1px 0 rgba(255,255,255,0.75);
   }
   .loading-card svg { width: 168px; height: auto; display: block; }
   .loading-title {
