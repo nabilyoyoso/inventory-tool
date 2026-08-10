@@ -94,8 +94,8 @@
     position: relative; z-index: 10;
   }
   header .eyebrow {
-    font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--muted); margin: 0 0 4px; order: 2;
+    font-family: 'IBM Plex Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 6px; order: 2;
   }
   header h1 {
     font-family: 'Oswald', sans-serif; font-weight: 700; font-size: clamp(30px, 5.5vw, 44px);
@@ -148,27 +148,34 @@
      target are always the same shape in the same place. Previously they were
      positioned independently and drifted apart. */
   .date-field { position: relative; }
-  .date-field::after {
-    content: ''; position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  /* Custom badge + icon, drawn entirely in our own markup so it is always
+     pixel-perfectly centered. The native ::-webkit-calendar-picker-indicator
+     is kept in the DOM only as an invisible, slightly oversized click target —
+     its real rendered position inside the browser's internal date-input
+     shadow tree can't be trusted to line up with CSS coordinates, which is
+     why the icon and the glow badge used to drift apart. */
+  .date-icon-badge {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
     width: 26px; height: 26px; border-radius: 8px; pointer-events: none;
+    display: flex; align-items: center; justify-content: center;
     background: radial-gradient(circle at 32% 24%, rgba(255,255,255,0.85), rgba(255,255,255,0.08) 50%, transparent 68%),
                 linear-gradient(180deg, rgba(95,208,199,0.32), rgba(74,222,148,0.14));
     border: 1px solid rgba(154,238,214,0.55);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 2px 6px rgba(0,0,0,0.35);
+    z-index: 1; transition: filter 0.15s;
   }
+  .date-icon-badge svg { width: 14px; height: 14px; stroke: #EAFBF3; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.4)); }
+  .date-field:hover .date-icon-badge { filter: brightness(1.15); }
   .date-field input[type="date"] {
     width: 100%; box-sizing: border-box; padding: 10px 44px 10px 12px; border: 1px solid var(--glass-border); border-radius: var(--radius);
     background: var(--glass-fill); color: var(--ink); font-family: 'IBM Plex Mono', monospace; font-size: 14px;
     appearance: none; -webkit-appearance: none; color-scheme: dark; position: relative;
   }
   .date-field input[type="date"]::-webkit-calendar-picker-indicator {
-    filter: invert(88%) sepia(28%) saturate(900%) hue-rotate(100deg) brightness(1.35) contrast(1.1)
-            drop-shadow(0 1px 1px rgba(0,0,0,0.6));
-    cursor: pointer; opacity: 1;
-    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-    width: 26px; height: 26px; margin: 0; padding: 0; z-index: 2;
+    cursor: pointer; opacity: 0; /* invisible — the visible icon is .date-icon-badge, drawn separately below */
+    position: absolute; right: 2px; top: 0;
+    width: 34px; height: 100%; margin: 0; padding: 0; z-index: 2;
   }
-  .date-field input[type="date"]:hover::-webkit-calendar-picker-indicator { filter: invert(95%) sepia(20%) saturate(1000%) hue-rotate(100deg) brightness(1.5) contrast(1.15) drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
   .date-field input[type="date"]:focus { outline: 2px solid var(--mint); outline-offset: 1px; }
 
   /* ---- Custom dropdown (multi-select everywhere now) ---- */
@@ -449,6 +456,14 @@
       <div class="field date-field">
         <label for="asOfDate">Stock as of date</label>
         <input type="date" id="asOfDate">
+        <span class="date-icon-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="3"></rect>
+            <line x1="16" y1="2" x2="16" y2="6"></line>
+            <line x1="8" y1="2" x2="8" y2="6"></line>
+            <line x1="3" y1="10" x2="21" y2="10"></line>
+          </svg>
+        </span>
       </div>
 
       <div class="field">
@@ -877,8 +892,18 @@ async function generateReport() {
     return;
   }
 
-  setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
-  renderInto(els.results, currentColumns, null, null, currentRows);
+  // Only Store Wise renders into the on-screen grid. Barcode Wise and
+  // Sale_Barcode Wise are export/PDF-only: the data is fetched and held in
+  // currentRows/currentColumns exactly the same way, so Export and Preview
+  // PDF work immediately — they just never get painted into the table.
+  if (reportType === 'store') {
+    setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${asOfDate}.`);
+    renderInto(els.results, currentColumns, null, null, currentRows);
+  } else {
+    setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} ready — as of ${asOfDate}. ${currentSheetLabel} isn't shown on screen; use Export or Preview PDF below.`);
+    renderInto(els.results, null, 'Report ready for export',
+      `${currentRows.length} row${currentRows.length === 1 ? '' : 's'} generated for ${currentSheetLabel}. This report type is export/PDF only — use the Export or Preview PDF button below.`);
+  }
   els.btnExport.disabled = false;
 }
 
