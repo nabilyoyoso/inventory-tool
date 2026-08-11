@@ -403,6 +403,35 @@
   .pdf-modal-frame { flex: 1; width: 100%; border: none; background: #4a4a4a; }
 
   /* ============================================================
+     ADMIN — MANAGE CATEGORY ACCESS
+     ============================================================ */
+  .access-modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 2200;
+    background: rgba(4,14,12,0.82); backdrop-filter: blur(4px);
+    align-items: center; justify-content: center; padding: 24px;
+  }
+  .access-modal-overlay.active { display: flex; }
+  .access-modal {
+    width: 100%; max-width: 760px; max-height: 84vh; display: flex; flex-direction: column;
+    background: var(--panel-solid); border: 1px solid var(--glass-border); border-radius: var(--radius-lg);
+    overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+  }
+  .access-modal-header { display:flex; justify-content:space-between; align-items:center; gap: 14px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  .access-modal-header h3 { font-family:'Oswald', sans-serif; font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; margin: 0; color: var(--ink); }
+  .access-modal-note { font-size: 12.5px; line-height: 1.5; color: var(--muted); padding: 14px 20px 0; margin: 0; }
+  .access-modal-body { padding: 16px 20px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+
+  .access-row { border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 14px; background: var(--glass-fill); }
+  .access-row-top { display:flex; justify-content:space-between; align-items:center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .access-email { font-family:'IBM Plex Mono', monospace; font-size: 13px; color: var(--ink); }
+  .access-unrestricted { display:flex; align-items:center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .access-unrestricted input { accent-color: var(--mint); }
+  .access-dd { max-width: 440px; transition: opacity 0.15s; }
+  .access-row-actions { display:flex; align-items:center; gap: 10px; margin-top: 10px; }
+  .access-status { font-family:'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--mint); }
+  .access-status.error { color: var(--danger); }
+
+  /* ============================================================
      REPORT-GENERATION LOADING OVERLAY
      Full-screen lock shown while a report is generating. Stays up until
      generateReport() explicitly hides it (success, empty result, or error) —
@@ -503,6 +532,7 @@
       <span class="sync-pill neutral" id="syncPill"><span class="dot"></span><span id="syncPillText">Checking…</span></span>
       <span class="sync-meta" id="syncMeta">Last update: —</span>
     </div>
+    <button type="button" class="secondary header-btn" id="btnManageAccess" style="display:none;">Manage Access</button>
     <button type="button" class="secondary header-btn" id="btnRefreshSync">Sync / Reload</button>
     <button type="button" class="secondary header-btn" id="btnLogout">Sign out</button>
   </div>
@@ -640,6 +670,26 @@
   </div>
 </div>
 
+<!-- ============================================================
+     ADMIN — MANAGE CATEGORY ACCESS
+     ============================================================ -->
+<div class="access-modal-overlay" id="accessModalOverlay">
+  <div class="access-modal">
+    <div class="access-modal-header">
+      <h3>Manage Category Access</h3>
+      <button type="button" class="secondary header-btn" id="accessModalClose">Close</button>
+    </div>
+    <p class="access-modal-note">
+      A user with no categories checked here is <strong>unrestricted</strong> and sees every report as normal.
+      Checking one or more categories locks that user to only those categories, everywhere in the app —
+      Store Wise, Barcode Wise, and Sale_Barcode Wise reports, exports, and PDFs.
+    </p>
+    <div class="access-modal-body" id="accessModalBody">
+      <p class="status-line">Loading…</p>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
 /* =====================================================================
@@ -674,6 +724,7 @@ function showApp() {
   loadStores();
   loadCategories();
   loadSyncStatus();
+  checkAdminAndShowButton();
 }
 
 // ---- Sync / Reload button + sync info panel ----
@@ -789,6 +840,135 @@ async function doLogin() {
 
 document.getElementById('btnLogout').addEventListener('click', async () => { await supabase.auth.signOut(); location.reload(); });
 
+// ============================================================================
+// ADMIN — MANAGE CATEGORY ACCESS
+// Every admin_* RPC is SECURITY DEFINER on the database side and checks
+// fn_is_admin() internally before doing anything, so a non-admin calling
+// these directly (e.g. via dev tools) gets rejected by Postgres regardless
+// of what this frontend shows or hides.
+// ============================================================================
+let allCategoriesForAdmin = [];
+
+async function checkAdminAndShowButton() {
+  const { data, error } = await supabase.rpc('fn_is_admin');
+  if (!error && data === true) {
+    document.getElementById('btnManageAccess').style.display = 'inline-flex';
+  }
+}
+
+document.getElementById('btnManageAccess').addEventListener('click', openAccessModal);
+document.getElementById('accessModalClose').addEventListener('click', closeAccessModal);
+
+function openAccessModal() {
+  document.getElementById('accessModalOverlay').classList.add('active');
+  loadAccessModalData();
+}
+function closeAccessModal() {
+  document.getElementById('accessModalOverlay').classList.remove('active');
+}
+
+async function loadAccessModalData() {
+  const body = document.getElementById('accessModalBody');
+  body.innerHTML = '<p class="status-line">Loading…</p>';
+
+  const [usersRes, accessRes, catsRes] = await Promise.all([
+    supabase.rpc('admin_list_users'),
+    supabase.rpc('admin_get_category_access'),
+    supabase.rpc('admin_get_all_categories'),
+  ]);
+
+  const firstError = usersRes.error || accessRes.error || catsRes.error;
+  if (firstError) {
+    body.innerHTML = `<p class="status-line error">Could not load access data: ${firstError.message}</p>`;
+    return;
+  }
+
+  allCategoriesForAdmin = (catsRes.data || []).map(c => c.category);
+
+  const accessByUser = {};
+  for (const row of accessRes.data || []) {
+    (accessByUser[row.user_id] ??= []).push(row.category);
+  }
+
+  renderAccessRows(usersRes.data || [], accessByUser);
+}
+
+function renderAccessRows(users, accessByUser) {
+  const body = document.getElementById('accessModalBody');
+  body.innerHTML = '';
+
+  if (users.length === 0) {
+    body.innerHTML = '<p class="status-line">No registered users found.</p>';
+    return;
+  }
+
+  for (const u of users) {
+    const current = accessByUser[u.user_id] || [];
+
+    const row = document.createElement('div');
+    row.className = 'access-row';
+    row.innerHTML = `
+      <div class="access-row-top">
+        <span class="access-email">${u.email}</span>
+        <label class="access-unrestricted">
+          <input type="checkbox" ${current.length === 0 ? 'checked' : ''}>
+          Unrestricted (sees everything)
+        </label>
+      </div>
+      <div class="access-dd"></div>
+      <div class="access-row-actions">
+        <button type="button" class="secondary access-save-btn">Save</button>
+        <span class="access-status"></span>
+      </div>
+    `;
+    body.appendChild(row);
+
+    const ddMount = row.querySelector('.access-dd');
+    const dd = createDropdown({ mountEl: ddMount, placeholder: 'Select categories…', allLabel: 'All categories' });
+    dd.setOptions(allCategoriesForAdmin.map(c => ({ value: c, label: c })));
+    dd.setSelected(current);
+
+    const checkbox = row.querySelector('.access-unrestricted input');
+    const syncDisabled = () => {
+      ddMount.style.opacity = checkbox.checked ? '0.4' : '1';
+      ddMount.style.pointerEvents = checkbox.checked ? 'none' : 'auto';
+    };
+    checkbox.addEventListener('change', syncDisabled);
+    syncDisabled();
+
+    const saveBtn = row.querySelector('.access-save-btn');
+    const statusEl = row.querySelector('.access-status');
+    saveBtn.addEventListener('click', async () => {
+      const unrestricted = checkbox.checked;
+      const categories = unrestricted ? [] : dd.getSelectedRaw();
+
+      if (!unrestricted && categories.length === 0) {
+        statusEl.textContent = 'Pick at least one category, or check Unrestricted.';
+        statusEl.classList.add('error');
+        return;
+      }
+
+      saveBtn.disabled = true;
+      statusEl.textContent = 'Saving…';
+      statusEl.classList.remove('error');
+
+      const { error } = await supabase.rpc('admin_set_user_categories', {
+        p_user_id: u.user_id,
+        p_categories: unrestricted ? null : categories,
+      });
+
+      saveBtn.disabled = false;
+      if (error) {
+        statusEl.textContent = 'Failed: ' + error.message;
+        statusEl.classList.add('error');
+      } else {
+        statusEl.textContent = 'Saved.';
+        setTimeout(() => { if (statusEl.textContent === 'Saved.') statusEl.textContent = ''; }, 2500);
+      }
+    });
+  }
+}
+
 checkAuth();
 
 // ============================================================================
@@ -870,6 +1050,15 @@ function createDropdown({ mountEl, placeholder, allLabel }) {
   return {
     setOptions(opts) { options = opts; renderList(); updateToggleLabel(); },
     getValue() { return isAllState() ? null : selected; },
+    // Raw explicit selection, distinct from getValue(): getValue() collapses
+    // "nothing picked" and "everything picked" both to null (meaning "no
+    // filter", which is what report filters want). The admin access screen
+    // needs the literal list either way, so it gets its own accessor.
+    getSelectedRaw() { return [...selected]; },
+    setSelected(values) {
+      selected = (values || []).filter(v => options.some(o => o.value === v));
+      updateToggleLabel(); renderList();
+    },
     onChange(cb) { onChangeCb = cb; },
     reset() { selected = []; updateToggleLabel(); renderList(); },
   };
