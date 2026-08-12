@@ -71,7 +71,7 @@ jobs:
       - name: Dump current schema from Supabase
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: psql "$SUPABASE_DB_URL" -X -q -A -t -f .github/scripts/dump_schema.sql -o schema.sql
+        run: psql "$SUPABASE_DB_URL" -X -q -A -t -f scripts/dump_schema.sql -o schema.sql
 
       - name: Commit schema.sql if it changed
         run: |
