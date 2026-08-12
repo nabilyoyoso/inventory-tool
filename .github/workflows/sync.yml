@@ -9,7 +9,9 @@ on:
     - cron: '*/30 * * * *'
 
   # Lets the relay service (and therefore the Refresh button on the report
-  # page) trigger a sync immediately, on demand, via GitHub's API.
+  # page) trigger a sync immediately, on demand, via GitHub's API. Both jobs
+  # below share this one trigger, so clicking "Sync / Reload" in the app
+  # also refreshes schema.sql, not just the data.
   workflow_dispatch: {}
 
 jobs:
@@ -30,3 +32,55 @@ jobs:
           ERP_CONNECTION_STRING: ${{ secrets.ERP_CONNECTION_STRING }}
           SUPABASE_CONNECTION_STRING: ${{ secrets.SUPABASE_CONNECTION_STRING }}
         run: dotnet run --project InventorySync.csproj -c Release
+
+  # ==========================================================================
+  # SCHEMA SNAPSHOT — keeps schema.sql in the repo automatically in sync with
+  # whatever is actually live in Supabase. This job is entirely independent
+  # of "sync" above: it has no `needs:`, doesn't touch the ERP or the C# app,
+  # and a failure here can never fail or block the data sync, or vice versa.
+  #
+  # It reads every public function, view, and table's column list straight
+  # from Postgres's own catalogs (pg_proc / pg_class / information_schema),
+  # so it's always a true reflection of what's live — no more manually
+  # dumping function definitions out of the SQL Editor after a change.
+  #
+  # It only commits when the dumped content actually differs from what's
+  # already in the repo, so this never creates empty/no-op commits.
+  #
+  # Uses a separate secret, SUPABASE_DB_URL, in libpq URI format
+  # (postgresql://...) — psql needs that format specifically; it cannot read
+  # the semicolon-separated .NET-style SUPABASE_CONNECTION_STRING used by
+  # the C# app above. See PROJECT_HANDOFF.md for where to get this URI.
+  # ==========================================================================
+  schema-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure psql is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+
+      - name: Dump current schema from Supabase
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: psql "$SUPABASE_DB_URL" -X -q -A -t -f .github/scripts/dump_schema.sql -o schema.sql
+
+      - name: Commit schema.sql if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add schema.sql
+          if git diff --cached --quiet; then
+            echo "schema.sql unchanged — nothing to commit."
+          else
+            git commit -m "chore: auto-sync schema.sql from Supabase [skip ci]"
+            git push
+          fi
