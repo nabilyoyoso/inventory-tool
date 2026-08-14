@@ -11,7 +11,7 @@
 -- alphabetically, not in dependency order), and it deliberately excludes RLS
 -- policies and GRANT statements — those still live only in their own numbered
 -- migration files. See PROJECT_HANDOFF.md for full architecture context.
--- Generated: 2026-08-14 18:26:02.167076+00
+-- Generated: 2026-08-14 19:30:23.647548+00
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
