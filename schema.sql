@@ -11,7 +11,7 @@
 -- alphabetically, not in dependency order), and it deliberately excludes RLS
 -- policies and GRANT statements — those still live only in their own numbered
 -- migration files. See PROJECT_HANDOFF.md for full architecture context.
--- Generated: 2026-08-14 06:54:50.628588+00
+-- Generated: 2026-08-14 08:19:21.453613+00
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -491,6 +491,49 @@ $function$
 ;
 
 -- ----------------------------------------------------------------------------
+-- FUNCTION: get_barcode_wise_report
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_barcode_wise_report(as_of_date date, p_store_codes text[] DEFAULT NULL::text[], p_category text[] DEFAULT NULL::text[], p_sub_category text[] DEFAULT NULL::text[])
+ RETURNS TABLE(report_date date, store_name text, barcode text, user_barcode text, category text, sub_category text, item_name text, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, lt_sale_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric, stock_age_days numeric)
+ LANGUAGE sql
+AS $function$
+    WITH agg AS (
+        SELECT
+            r.store_name, r.barcode, r.user_barcode, r.category, r.sub_category, r.item_name,
+            SUM(r.opening_stock_qty)  AS opening_stock_qty,
+            SUM(r.on_hand_stock_qty)  AS on_hand_stock_qty,
+            SUM(r.pending_stock_qty)  AS pending_stock_qty,
+            SUM(r.gross_stock_qty)    AS gross_stock_qty,
+            SUM(r.lt_sale_qty)        AS lt_sale_qty,
+            SUM(r.opening_cost_value) AS opening_cost_value,
+            SUM(r.on_hand_cost_value) AS on_hand_cost_value,
+            SUM(r.pending_cost_value) AS pending_cost_value,
+            SUM(r.gross_cost_value)   AS gross_cost_value,
+            SUM(r.opening_sal_value)  AS opening_sal_value,
+            SUM(r.on_hand_sal_value)  AS on_hand_sal_value,
+            SUM(r.pending_sal_value)  AS pending_sal_value,
+            SUM(r.gross_sal_value)    AS gross_sal_value
+        FROM get_sale_barcode_wise_report(as_of_date, p_store_codes, p_category, p_sub_category, NULL) r
+        GROUP BY r.store_name, r.barcode, r.user_barcode, r.category, r.sub_category, r.item_name
+    )
+    SELECT
+        as_of_date AS report_date,
+        a.store_name, a.barcode, a.user_barcode, a.category, a.sub_category, a.item_name,
+        a.opening_stock_qty, a.on_hand_stock_qty, a.pending_stock_qty, a.gross_stock_qty,
+        a.lt_sale_qty,
+        a.opening_cost_value, a.on_hand_cost_value, a.pending_cost_value, a.gross_cost_value,
+        a.opening_sal_value, a.on_hand_sal_value, a.pending_sal_value, a.gross_sal_value,
+        ba.stock_age_days
+    FROM agg a
+    JOIN store s ON s.store_name = a.store_name
+    LEFT JOIN fn_barcode_stock_age(as_of_date, p_store_codes) ba
+        ON ba.store_code = s.store_code AND ba.barcode = a.barcode
+    ORDER BY a.store_name, a.barcode
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
 -- FUNCTION: get_distinct_categories
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.get_distinct_categories()
@@ -526,7 +569,7 @@ $function$
 -- FUNCTION: get_sale_barcode_wise_report
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.get_sale_barcode_wise_report(as_of_date date, p_store_codes text[] DEFAULT NULL::text[], p_category text[] DEFAULT NULL::text[], p_sub_category text[] DEFAULT NULL::text[], p_search text DEFAULT NULL::text)
- RETURNS TABLE(report_date date, store_name text, barcode text, sal_barcode text, user_barcode text, category text, sub_category text, item_name text, cpu numeric, mrp numeric, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric, stock_age_days numeric)
+ RETURNS TABLE(report_date date, store_name text, barcode text, sal_barcode text, user_barcode text, category text, sub_category text, item_name text, cpu numeric, mrp numeric, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, lt_sale_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric, stock_age_days numeric)
  LANGUAGE sql
 AS $function$
     WITH batch AS (
@@ -544,6 +587,27 @@ AS $function$
             ON COALESCE(o.store_code, h.store_code) = p.store_code
            AND COALESCE(o.barcode, h.barcode) = p.barcode
            AND COALESCE(o.sal_barcode, h.sal_barcode) = p.sal_barcode
+    ),
+    -- Lifetime sale qty: all history up to and including as_of_date.
+    lt_sale AS (
+        SELECT store_code, barcode, sal_barcode,
+               SUM(sale_qty) - SUM(rtn_qty) AS lt_sale_qty
+        FROM sale
+        WHERE txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
+        GROUP BY store_code, barcode, sal_barcode
+    ),
+    -- Any store+barcode pair with at least one real (non-zero quantity)
+    -- ledger movement on or before as_of_date. Bounded by as_of_date, same
+    -- as every other calculation in this system. This is a data-integrity
+    -- check ("was this barcode ever genuinely transacted at this store, as
+    -- of this date"), not a live current-stock calculation.
+    store_has_history AS (
+        SELECT DISTINCT store_code, barcode
+        FROM vw_stock_ledger
+        WHERE (in_qty <> 0 OR out_qty <> 0)
+          AND txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
     )
     SELECT
         as_of_date AS report_date,
@@ -560,6 +624,7 @@ AS $function$
         b.on_hand_qty,
         b.pending_qty,
         b.on_hand_qty + b.pending_qty                            AS gross_stock_qty,
+        COALESCE(ls.lt_sale_qty, 0)                               AS lt_sale_qty,
         b.opening_qty * ps.cpu                                    AS opening_cost_value,
         b.on_hand_qty * ps.cpu                                    AS on_hand_cost_value,
         b.pending_qty * ps.cpu                                    AS pending_cost_value,
@@ -575,17 +640,24 @@ AS $function$
     LEFT JOIN product_stock ps ON ps.sal_barcode = b.sal_barcode
     LEFT JOIN fn_sale_barcode_stock_period(as_of_date, p_store_codes) sp
         ON sp.store_code = b.store_code AND sp.barcode = b.barcode AND sp.sal_barcode = b.sal_barcode
+    LEFT JOIN lt_sale ls
+        ON ls.store_code = b.store_code AND ls.barcode = b.barcode AND ls.sal_barcode = b.sal_barcode
     WHERE (p_store_codes IS NULL OR b.store_code = ANY(p_store_codes))
       AND (p_category IS NULL OR pf.category = ANY(p_category))
       AND (p_sub_category IS NULL OR pf.sub_category = ANY(p_sub_category))
-      -- Database-level enforcement: applies no matter what p_category was
-      -- called with, so a tampered request can't see outside the allowed
-      -- list. NULL from fn_user_allowed_categories() means unrestricted.
       AND (public.fn_user_allowed_categories() IS NULL OR pf.category = ANY(public.fn_user_allowed_categories()))
       AND (p_search IS NULL OR p_search = '' OR
            b.barcode ILIKE '%' || p_search || '%' OR
            b.sal_barcode ILIKE '%' || p_search || '%' OR
            pf.user_barcode ILIKE '%' || p_search || '%')
+      -- Store-level transaction-history filter (warehouse exempt):
+      AND (
+            b.store_code = '100010001'
+            OR EXISTS (
+                SELECT 1 FROM store_has_history hh
+                WHERE hh.store_code = b.store_code AND hh.barcode = b.barcode
+            )
+          )
     ORDER BY s.store_name, b.barcode, b.sal_barcode
 $function$
 
@@ -613,6 +685,35 @@ AS $function$
         SUM(r.pending_sal_value)  AS pending_sal_value,
         SUM(r.gross_sal_value)    AS gross_sal_value
     FROM get_sale_barcode_wise_report(as_of_date, p_store_codes, p_category, p_sub_category, p_search) r
+    GROUP BY r.store_name
+    ORDER BY r.store_name
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: get_store_wise_report
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_store_wise_report(as_of_date date, p_store_codes text[] DEFAULT NULL::text[], p_category text[] DEFAULT NULL::text[], p_sub_category text[] DEFAULT NULL::text[])
+ RETURNS TABLE(store_name text, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, lt_sale_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric)
+ LANGUAGE sql
+AS $function$
+    SELECT
+        r.store_name,
+        SUM(r.opening_stock_qty)  AS opening_stock_qty,
+        SUM(r.on_hand_stock_qty)  AS on_hand_stock_qty,
+        SUM(r.pending_stock_qty)  AS pending_stock_qty,
+        SUM(r.gross_stock_qty)    AS gross_stock_qty,
+        SUM(r.lt_sale_qty)        AS lt_sale_qty,
+        SUM(r.opening_cost_value) AS opening_cost_value,
+        SUM(r.on_hand_cost_value) AS on_hand_cost_value,
+        SUM(r.pending_cost_value) AS pending_cost_value,
+        SUM(r.gross_cost_value)   AS gross_cost_value,
+        SUM(r.opening_sal_value)  AS opening_sal_value,
+        SUM(r.on_hand_sal_value)  AS on_hand_sal_value,
+        SUM(r.pending_sal_value)  AS pending_sal_value,
+        SUM(r.gross_sal_value)    AS gross_sal_value
+    FROM get_sale_barcode_wise_report(as_of_date, p_store_codes, p_category, p_sub_category, NULL) r
     GROUP BY r.store_name
     ORDER BY r.store_name
 $function$
