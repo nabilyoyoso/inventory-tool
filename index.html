@@ -63,26 +63,14 @@
     --error-bg: rgba(58, 22, 18, 0.92);
     --neutral-fg: var(--gold);
     --neutral-bg: rgba(28, 30, 34, 0.92);
-
-    /* ---- Light "page chrome" theme (body + header only) ----
-       Additive tokens, layered on top of everything above. The Filter and
-       Results panels keep using --panel/--glass-*/--ink etc exactly as
-       before and are completely unaffected by these. */
-    --page-bg: #FFFFFF;
-    --header-bg-top: #FFFFFF;
-    --header-bg-bottom: #F1FAF7;
-    --header-border: rgba(15,120,105,0.18);
-    --header-ink: #0B2E28;
-    --header-muted: #4B786F;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--page-bg); color: #123B2C;
+    margin: 0; background: var(--void); color: var(--ink);
     font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased;
     background-image:
-      radial-gradient(circle at 10% -8%, rgba(74,222,148,0.10), transparent 45%),
-      radial-gradient(circle at 92% 4%, rgba(95,208,199,0.08), transparent 42%),
-      radial-gradient(circle at 50% 100%, rgba(147,168,224,0.05), transparent 55%);
+      radial-gradient(circle at 12% -10%, rgba(74,222,148,0.10), transparent 45%),
+      radial-gradient(circle at 90% 0%, rgba(147,168,224,0.08), transparent 40%);
     background-attachment: fixed;
   }
 
@@ -97,34 +85,33 @@
   @media (prefers-reduced-motion: reduce) { .sparkle { animation: none !important; } }
 
   header {
-    background: linear-gradient(180deg, var(--header-bg-top) 0%, var(--header-bg-bottom) 100%);
+    background: linear-gradient(180deg, #061C18 0%, #02100D 100%);
     backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--header-border);
-    /* Soft matching-color glow fading downward beneath the border, sitting
-       on top of the border itself — the separation effect between header
-       and main content. */
-    box-shadow: 0 1px 0 rgba(15,120,105,0.12), 0 26px 34px -22px rgba(74,222,148,0.40);
-    color: var(--header-ink); padding: 20px clamp(16px, 4vw, 48px) 18px;
+    border-bottom: 1px solid var(--line);
+    /* Original drop shadow, plus a soft mint glow fading downward beneath
+       the border — the requested header/content separation effect. */
+    box-shadow: 0 10px 24px -10px rgba(0,0,0,0.5), 0 2px 8px -2px rgba(0,0,0,0.35), 0 26px 34px -22px rgba(74,222,148,0.30);
+    color: var(--ink); padding: 20px clamp(16px, 4vw, 48px) 18px;
     display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;
     position: sticky; top: 0; z-index: 200;
   }
   header .eyebrow {
     font-family: 'IBM Plex Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-    color: var(--header-muted); margin: 0 0 6px; order: 2;
+    color: var(--muted); margin: 0 0 6px; order: 2;
   }
   header h1 {
     font-family: 'Oswald', sans-serif; font-weight: 700; font-size: clamp(30px, 5.5vw, 44px);
     letter-spacing: 0.015em; margin: 0; text-transform: uppercase; order: 1;
-    background: linear-gradient(180deg, #14B39F 0%, #0E8C8A 45%, #0B6E68 85%, #08585C 100%);
+    background: linear-gradient(180deg, var(--teal-soft) 0%, var(--teal-mid) 45%, var(--turquoise-deep) 85%, var(--turquoise-ink) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
-    filter: drop-shadow(0 1px 1px rgba(8,88,92,0.18));
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,0.30)) drop-shadow(0 1.5px 0 rgba(255,255,255,0.12)) drop-shadow(0 3px 6px rgba(0,0,0,0.5));
   }
   header > div:first-child { display: flex; flex-direction: column; }
 
   .header-right { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
 
   /* ---- Sync info panel ---- */
-  .sync-panel { display:flex; align-items:center; gap:10px; padding: 6px 14px 6px 8px; border-radius: 999px; font-family:'IBM Plex Mono', monospace; font-size: 11.5px; background: rgba(15,120,105,0.06); border: 1px solid rgba(15,120,105,0.18); }
+  .sync-panel { display:flex; align-items:center; gap:10px; padding: 6px 14px 6px 8px; border-radius: 999px; font-family:'IBM Plex Mono', monospace; font-size: 11.5px; background: var(--glass-fill); border: 1px solid var(--glass-border); }
   .sync-pill { display:flex; align-items:center; gap:6px; padding: 5px 12px; border-radius: 999px; font-weight:600; letter-spacing:0.03em; }
   .sync-pill .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
   .sync-pill.success { background: var(--success-bg); color: var(--success-fg); }
@@ -132,8 +119,8 @@
   .sync-pill.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
   .sync-pill.syncing .dot { animation: pulse-dot 1s ease-in-out infinite; }
   @keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
-  .sync-meta { color: #5C7A73; white-space:nowrap; }
-  .sync-meta strong { color: #123B2C; font-weight:600; }
+  .sync-meta { color: var(--muted); white-space:nowrap; }
+  .sync-meta strong { color: var(--ink); font-weight:500; }
 
   .toast { position: fixed; bottom: 24px; right: 24px; max-width: 340px; padding: 14px 18px; border-radius: var(--radius); font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 500; box-shadow: 0 12px 30px rgba(0,0,0,0.5); z-index: 1000; animation: toast-in 0.2s ease-out; border: 1px solid var(--glass-border); }
   .toast.success { background: rgba(47,174,114,0.95); color: #06231A; }
@@ -255,8 +242,8 @@
   button.secondary { background: var(--glass-fill); color: var(--ink); border-color: var(--glass-border); }
   button.secondary:hover { background: var(--glass-fill-strong); }
   button.secondary:disabled { opacity: 0.4; cursor: not-allowed; }
-  button.header-btn { background: rgba(15,120,105,0.05); color: #0F4B41; border-color: rgba(15,120,105,0.25); font-size:12.5px; padding: 8px 16px; }
-  button.header-btn:hover { background: rgba(15,120,105,0.12); }
+  button.header-btn { background: transparent; color: var(--ink); border-color: var(--glass-border); font-size:12.5px; padding: 8px 16px; }
+  button.header-btn:hover { background: var(--glass-fill); }
   button:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
 
   .status-line { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--muted); margin: 14px 0 0; }
@@ -551,6 +538,7 @@
     <button type="button" class="secondary header-btn" id="btnRefreshSync">Sync / Reload</button>
     <button type="button" class="secondary header-btn" id="btnLogout">Sign out</button>
   </div>
+  <div style="position:absolute; left:0; right:0; bottom:0; height:3px; background:linear-gradient(90deg, var(--mint), var(--cyan)); opacity:0.6;"></div>
 </header>
 
 <main>
