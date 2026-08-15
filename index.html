@@ -1154,13 +1154,21 @@ async function generateReport() {
       barcode: 'get_barcode_wise_report',
       sale_barcode: 'get_sale_barcode_wise_report',
     };
+    // Only get_sale_barcode_wise_report accepts p_search — get_store_wise_report
+    // and get_barcode_wise_report take exactly 4 parameters. Sending p_search
+    // (even as null) to either of those makes PostgREST reject the call with
+    // "Could not find the function ... in the schema cache", since it can't
+    // match an unknown parameter name to any overload. See PROJECT_HANDOFF.md
+    // Section 7 item 12 / Section 12.
     const params = {
       as_of_date: asOfDate,
       p_store_codes: storeCodes,
       p_category: categories,
       p_sub_category: subCategories,
-      p_search: searchTerm,
     };
+    if (reportType === 'sale_barcode') {
+      params.p_search = searchTerm;
+    }
 
     const { data, error } = await supabase.rpc(fnMap[reportType], params);
 
