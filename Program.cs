@@ -6,14 +6,20 @@
 // relay service). No web server, no auth logic needed here — only GitHub
 // Actions itself ever runs this, using secrets it already trusts.
 //
-// Safety model: every table is staged into a "_staging" copy first. Only if
-// EVERY table stages successfully does anything get swapped into the real
-// tables — and that swap happens inside one Postgres transaction, so either
-// everything updates together or nothing does. A network blip partway
-// through never leaves your data half-updated.
+// Safety model:
+//   * ERP SQL Server is strictly READ-ONLY. This program performs SELECTs only.
+//   * No ERP database setting, schema, index, or persistent transaction mode is changed.
+//   * Source reads use short-lived commands with a 5-second lock timeout and
+//     LOW deadlock priority, so the ERP workload is protected.
+//   * Every table is staged into a Supabase "_staging" copy first.
+//   * Only if EVERY table stages successfully does anything get swapped into the
+//     real Supabase tables, and that swap happens inside one PostgreSQL transaction.
+//   * Incremental tables re-read an overlap window (default 30 days), protecting
+//     against ordinary late/backdated ERP entries without touching the ERP.
 // ============================================================================
 
 using Microsoft.Data.SqlClient;
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -140,45 +146,100 @@ class TableSpec
 // ============================================================================
 class SyncRunner
 {
+    private const int DefaultOverlapDays = 30;
+    private const int DefaultSourceCommandTimeoutSeconds = 600;
+    private const string AdvisoryLockSql =
+        "SELECT pg_advisory_lock(hashtextextended('yoyoso_inventory_sync', 0));";
+
     private readonly string _sourceConnStr;
     private readonly string _targetConnStr;
     private readonly Action<string> _log;
+    private readonly int _overlapDays;
+    private readonly int _sourceCommandTimeoutSeconds;
 
     public SyncRunner(string sourceConnStr, string targetConnStr, Action<string> log)
     {
         _sourceConnStr = sourceConnStr;
 
-        // Connection pooling is switched off entirely. This is a short-lived
-        // batch job, not a long-running web app, so the small extra cost of
-        // opening a fresh connection each time is irrelevant — and it
-        // permanently rules out a broken connection from one failed table
-        // "poisoning" the next table's connection, which pooling was doing.
-        var csBuilder = new NpgsqlConnectionStringBuilder(targetConnStr) { Pooling = false };
+        // This is a short-lived batch job. Pooling is intentionally disabled so
+        // a broken connection from a failed COPY can never poison the next
+        // table's connection.
+        var csBuilder = new NpgsqlConnectionStringBuilder(targetConnStr)
+        {
+            Pooling = false
+        };
         _targetConnStr = csBuilder.ConnectionString;
-
         _log = log;
+
+        _overlapDays = ReadPositiveIntEnvironment("SYNC_OVERLAP_DAYS", DefaultOverlapDays, 1, 365);
+        _sourceCommandTimeoutSeconds = ReadPositiveIntEnvironment(
+            "ERP_COMMAND_TIMEOUT_SECONDS",
+            DefaultSourceCommandTimeoutSeconds,
+            60,
+            1800);
     }
 
     public async Task<bool> RunFullSyncAsync(List<TableSpec> specs)
     {
-        var staged = new List<(TableSpec spec, int rowCount, DateTime? cutoff)>();
+        await using var lockConnection = new NpgsqlConnection(_targetConnStr);
+        await lockConnection.OpenAsync();
+        await AcquireAdvisoryLockAsync(lockConnection);
 
-        foreach (var spec in specs)
+        _log($"--- PostgreSQL sync lock acquired. Incremental overlap: {_overlapDays} day(s). ---");
+
+        var staged = new List<(TableSpec spec, int rowCount, DateTime cutoff)>();
+
+        await using var source = new SqlConnection(_sourceConnStr);
+        await source.OpenAsync();
+
+        // HARD SAFETY RULE:
+        // The ERP is production-critical and strictly READ-ONLY. This program
+        // performs SELECTs only. It never changes ERP data, schema, indexes,
+        // persistent settings, or transaction configuration.
+        //
+        // These are session-only protections. If our SELECT is blocked by an
+        // ERP workload for more than five seconds, the sync fails safely instead
+        // of waiting indefinitely or putting pressure on the ERP.
+        await using (var safetyCmd = new SqlCommand(
+            "SET LOCK_TIMEOUT 5000; SET DEADLOCK_PRIORITY LOW;",
+            source))
         {
-            var (ok, rowCount, cutoff) = await StageTableAsync(spec);
-            if (!ok)
+            await safetyCmd.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await ValidateSourceMasterKeysAsync(source);
+
+            foreach (var spec in specs)
             {
-                _log("!! One or more tables failed to stage. Aborting — no changes applied to any table.");
-                return false;
+                DateTime cutoff = spec.Kind == TableKind.Incremental
+                    ? CalculateSafeCutoff(await GetLastSyncedDateAsync(spec.SyncKey), _overlapDays)
+                    : DateTime.MinValue;
+
+                _log(spec.Kind == TableKind.Incremental
+                    ? $"--- Staging: {spec.TargetTable} from {cutoff:yyyy-MM-dd} (overlap protected) ---"
+                    : $"--- Staging: {spec.TargetTable} (full master reload) ---");
+
+                int rowCount = await StageTableAsync(spec, source, cutoff);
+                staged.Add((spec, rowCount, cutoff));
+                _log($"    {spec.TargetTable}: {rowCount} rows staged.");
             }
-            staged.Add((spec, rowCount, cutoff));
+
+            _log("--- ERP extraction completed using SELECT-only, short-lived read commands. No source transaction was held. ---");
+        }
+        catch (Exception ex)
+        {
+            _log($"!! ERP read/staging failed. No Supabase data was swapped: {ex.Message}");
+            await TryClearStagingTablesAsync(specs);
+            return false;
         }
 
         _log("--- All tables staged successfully. Swapping into place... ---");
 
         await using var target = new NpgsqlConnection(_targetConnStr);
         await target.OpenAsync();
-        await using var tx = await target.BeginTransactionAsync();
+        await using var targetTx = await target.BeginTransactionAsync();
 
         try
         {
@@ -188,139 +249,260 @@ class SyncRunner
 
                 if (spec.Kind == TableKind.Master)
                 {
-                    await ExecAsync(target, tx, $"TRUNCATE TABLE {spec.TargetTable}");
-                    await ExecAsync(target, tx, $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
+                    await ExecAsync(target, targetTx, $"TRUNCATE TABLE {spec.TargetTable}");
+                    await ExecAsync(
+                        target,
+                        targetTx,
+                        $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
                 }
                 else
                 {
-                    await ExecAsync(target, tx,
+                    await ExecAsync(
+                        target,
+                        targetTx,
                         $"DELETE FROM {spec.TargetTable} WHERE {spec.TargetDateColumn} >= @cutoff",
-                        cmd => cmd.Parameters.AddWithValue("cutoff", (cutoff ?? new DateTime(2000, 1, 1)).Date));
+                        cmd => cmd.Parameters.AddWithValue("cutoff", cutoff.Date));
 
-                    await ExecAsync(target, tx, $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
+                    await ExecAsync(
+                        target,
+                        targetTx,
+                        $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
 
-                    DateTime newCutoff = rowCount > 0 ? DateTime.Now.Date : (cutoff ?? new DateTime(2000, 1, 1));
-                    await ExecAsync(target, tx,
-                        "UPDATE sync_log SET last_synced_date = @d, last_synced_at = now(), rows_synced = @r WHERE table_name = @k",
-                        cmd => { cmd.Parameters.AddWithValue("d", newCutoff); cmd.Parameters.AddWithValue("r", rowCount); cmd.Parameters.AddWithValue("k", spec.SyncKey); });
+                    // The watermark is the current ERP day, not "only if rows
+                    // were found". The overlap window means later syncs always
+                    // re-check recent history, so late/backdated rows in that
+                    // protected window cannot be lost.
+                    DateTime newCutoff = DateTime.Now.Date;
+                    await ExecAsync(
+                        target,
+                        targetTx,
+                        """
+                        INSERT INTO sync_log (table_name, last_synced_date, last_synced_at, rows_synced)
+                        VALUES (@k, @d, now(), @r)
+                        ON CONFLICT (table_name)
+                        DO UPDATE SET
+                            last_synced_date = EXCLUDED.last_synced_date,
+                            last_synced_at = EXCLUDED.last_synced_at,
+                            rows_synced = EXCLUDED.rows_synced
+                        """,
+                        cmd =>
+                        {
+                            cmd.Parameters.AddWithValue("d", newCutoff);
+                            cmd.Parameters.AddWithValue("r", rowCount);
+                            cmd.Parameters.AddWithValue("k", spec.SyncKey);
+                        });
                 }
 
                 _log($"    {spec.TargetTable}: {rowCount} rows swapped into place.");
             }
 
-            await tx.CommitAsync();
-
-            _log("--- Swap complete. Clearing staging tables... ---");
-            foreach (var (spec, _, _) in staged)
-            {
-                try
-                {
-                    using var cleanupCmd = new NpgsqlCommand($"TRUNCATE TABLE {spec.TargetTable}_staging", target);
-                    await cleanupCmd.ExecuteNonQueryAsync();
-                }
-                catch (Exception ex)
-                {
-                    // Not critical: the real data already swapped in successfully above.
-                    // A leftover staging table just gets cleared at the start of the
-                    // next run instead — nothing is lost or at risk here.
-                    _log($"    (non-critical) Could not clear staging table for {spec.TargetTable}: {ex.Message}");
-                }
-            }
-
-            return true;
+            await targetTx.CommitAsync();
+            _log("--- Atomic Supabase swap committed successfully. ---");
         }
         catch (Exception ex)
         {
-            await tx.RollbackAsync();
-            _log($"!! Swap step failed, rolled back everything: {ex.Message}");
+            try { await targetTx.RollbackAsync(); } catch { /* best effort */ }
+            _log($"!! Supabase swap failed — transaction rolled back: {ex.Message}");
+            await TryClearStagingTablesAsync(specs);
             return false;
         }
+
+        await TryClearStagingTablesAsync(specs);
+        _log("--- Staging cleanup complete. Sync finished while the advisory lock remained held. ---");
+        return true;
     }
 
-    private static async Task ExecAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql, Action<NpgsqlCommand>? configure = null)
-    {
-        using var cmd = new NpgsqlCommand(sql, conn, tx);
-        configure?.Invoke(cmd);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    private async Task<(bool ok, int rowCount, DateTime? cutoff)> StageTableAsync(TableSpec spec)
+    private async Task<int> StageTableAsync(
+        TableSpec spec,
+        SqlConnection source,
+        DateTime cutoff)
     {
         string stagingTable = $"{spec.TargetTable}_staging";
-        const int maxAttempts = 3;
 
-        DateTime? cutoff = spec.Kind == TableKind.Incremental
-            ? (await GetLastSyncedDateAsync(spec.SyncKey) ?? new DateTime(2000, 1, 1))
-            : null;
-
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        await using (var target = new NpgsqlConnection(_targetConnStr))
         {
-            _log(attempt == 1 ? $"--- Staging: {spec.TargetTable} ---" : $"--- Retrying stage: {spec.TargetTable} (attempt {attempt}/{maxAttempts}) ---");
-            try
-            {
-                await using (var target = new NpgsqlConnection(_targetConnStr))
-                {
-                    await target.OpenAsync();
-                    using var createStaging = new NpgsqlCommand($"CREATE TABLE IF NOT EXISTS {stagingTable} (LIKE {spec.TargetTable} INCLUDING ALL)", target);
-                    await createStaging.ExecuteNonQueryAsync();
-                    using var truncateStaging = new NpgsqlCommand($"TRUNCATE TABLE {stagingTable}", target);
-                    await truncateStaging.ExecuteNonQueryAsync();
-                }
+            await target.OpenAsync();
+            await using var createStaging = new NpgsqlCommand(
+                $"CREATE TABLE IF NOT EXISTS {stagingTable} (LIKE {spec.TargetTable} INCLUDING ALL)",
+                target);
+            await createStaging.ExecuteNonQueryAsync();
 
-                int rowCount = await StreamCopyAsync(spec.SourceSql, cutoff, stagingTable, spec.Columns, spec.Types);
-                _log($"    {spec.TargetTable}: {rowCount} rows staged.");
-                return (true, rowCount, cutoff);
-            }
-            catch (Exception ex)
-            {
-                if (attempt == maxAttempts) { _log($"    !! Staging failed for {spec.TargetTable} after {maxAttempts} attempts: {ex.Message}"); }
-                else { _log($"    Attempt {attempt} failed ({ex.Message}). Waiting before retry..."); await Task.Delay(TimeSpan.FromSeconds(5 * attempt)); }
-            }
+            await using var truncateStaging = new NpgsqlCommand(
+                $"TRUNCATE TABLE {stagingTable}",
+                target);
+            await truncateStaging.ExecuteNonQueryAsync();
         }
-        return (false, 0, cutoff);
+
+        string sql = spec.Kind == TableKind.Incremental
+            ? spec.SourceSql
+            : spec.SourceSql;
+
+        await using var cmd = new SqlCommand(sql, source)
+        {
+            CommandTimeout = _sourceCommandTimeoutSeconds
+        };
+
+        if (spec.Kind == TableKind.Incremental)
+        {
+            cmd.Parameters.Add("@cutoff", System.Data.SqlDbType.Date).Value = cutoff.Date;
+        }
+
+        await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess);
+        await using var targetConnection = new NpgsqlConnection(_targetConnStr);
+        await targetConnection.OpenAsync();
+
+        string colList = string.Join(", ", spec.Columns);
+        await using var writer = await targetConnection.BeginBinaryImportAsync(
+            $"COPY {stagingTable} ({colList}) FROM STDIN (FORMAT BINARY)");
+
+        int count = 0;
+        var row = new object?[spec.Columns.Length];
+
+        while (await reader.ReadAsync())
+        {
+            reader.GetValues(row!);
+            await writer.StartRowAsync();
+
+            for (int i = 0; i < row.Length; i++)
+            {
+                object? value = row[i] is DBNull ? null : row[i];
+
+                if (value is null)
+                {
+                    await writer.WriteNullAsync();
+                }
+                else if (spec.Types[i] == NpgsqlDbType.Date && value is DateTime dt)
+                {
+                    await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
+                }
+                else
+                {
+                    await writer.WriteAsync(value, spec.Types[i]);
+                }
+            }
+
+            count++;
+        }
+
+        await writer.CompleteAsync();
+        return count;
     }
 
     private async Task<DateTime?> GetLastSyncedDateAsync(string syncKey)
     {
         await using var conn = new NpgsqlConnection(_targetConnStr);
         await conn.OpenAsync();
-        using var cmd = new NpgsqlCommand("SELECT last_synced_date FROM sync_log WHERE table_name = @key", conn);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT last_synced_date FROM sync_log WHERE table_name = @key",
+            conn);
         cmd.Parameters.AddWithValue("key", syncKey);
-        var result = await cmd.ExecuteScalarAsync();
-        return (result == null || result is DBNull) ? null : (DateTime)result;
+        object? result = await cmd.ExecuteScalarAsync();
+        return result is null || result is DBNull ? null : (DateTime)result;
     }
 
-    private async Task<int> StreamCopyAsync(string sourceSql, DateTime? cutoffParam, string targetTable, string[] columns, NpgsqlDbType[] types)
+    private static DateTime CalculateSafeCutoff(DateTime? lastSyncedDate, int overlapDays)
     {
-        using var source = new SqlConnection(_sourceConnStr);
-        await source.OpenAsync();
-        using var cmd = new SqlCommand(sourceSql, source) { CommandTimeout = 300 };
-        if (cutoffParam.HasValue) cmd.Parameters.AddWithValue("@cutoff", cutoffParam.Value);
-        using var reader = await cmd.ExecuteReaderAsync();
+        DateTime baseline = (lastSyncedDate ?? new DateTime(2000, 1, 1)).Date;
+        DateTime cutoff = baseline.AddDays(-overlapDays);
+        return cutoff < new DateTime(2000, 1, 1) ? new DateTime(2000, 1, 1) : cutoff;
+    }
 
-        await using var target = new NpgsqlConnection(_targetConnStr);
-        await target.OpenAsync();
+    private async Task ValidateSourceMasterKeysAsync(SqlConnection source)
+    {
+        // STORE_CODE and PRODUCT_FILE.BARCODE are direct relationship keys in
+        // Supabase and must be unique in the source master.
+        await EnsureNoDuplicateKeyAsync(
+            source,
+            "SELECT TOP (1) STORE_CODE FROM STORE WHERE STORE_CODE IS NOT NULL GROUP BY STORE_CODE HAVING COUNT_BIG(*) > 1",
+            "STORE.STORE_CODE");
 
-        string colList = string.Join(", ", columns);
-        await using var writer = await target.BeginBinaryImportAsync($"COPY {targetTable} ({colList}) FROM STDIN (FORMAT BINARY)");
+        await EnsureNoDuplicateKeyAsync(
+            source,
+            "SELECT TOP (1) BARCODE FROM PRODUCT_FILE WHERE BARCODE IS NOT NULL GROUP BY BARCODE HAVING COUNT_BIG(*) > 1",
+            "PRODUCT_FILE.BARCODE");
 
-        int count = 0;
-        var row = new object?[columns.Length];
-        while (await reader.ReadAsync())
+        // PRODUCT_STOCK is intentionally normalized by the source SELECT
+        // (GROUP BY SAL_BARCODE with MAX pricing), so raw duplicate SAL_BARCODE
+        // rows are not automatically an error in the ERP schema.
+    }
+
+    private async Task EnsureNoDuplicateKeyAsync(
+        SqlConnection source,
+        string sql,
+        string keyName)
+    {
+        await using var cmd = new SqlCommand(sql, source)
         {
-            reader.GetValues(row!);
-            await writer.StartRowAsync();
-            for (int i = 0; i < row.Length; i++)
-            {
-                var val = row[i] is DBNull ? null : row[i];
-                if (val == null) await writer.WriteNullAsync();
-                else if (types[i] == NpgsqlDbType.Date && val is DateTime dt) await writer.WriteAsync(DateOnly.FromDateTime(dt), NpgsqlDbType.Date);
-                else await writer.WriteAsync(val, types[i]);
-            }
-            count++;
+            CommandTimeout = _sourceCommandTimeoutSeconds
+        };
+
+        object? duplicate = await cmd.ExecuteScalarAsync();
+        if (duplicate is not null && duplicate is not DBNull)
+        {
+            throw new InvalidOperationException(
+                $"Source master-data validation failed: duplicate {keyName} value '{duplicate}'. " +
+                "The sync was stopped to prevent report quantity multiplication.");
+        }
+    }
+
+    private static async Task ExecAsync(
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        string sql,
+        Action<NpgsqlCommand>? configure = null)
+    {
+        await using var cmd = new NpgsqlCommand(sql, conn, tx);
+        configure?.Invoke(cmd);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task AcquireAdvisoryLockAsync(NpgsqlConnection conn)
+    {
+        await using var cmd = new NpgsqlCommand(AdvisoryLockSql, conn);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task TryClearStagingTablesAsync(IEnumerable<TableSpec> specs)
+    {
+        await using var target = new NpgsqlConnection(_targetConnStr);
+        try
+        {
+            await target.OpenAsync();
+        }
+        catch (Exception ex)
+        {
+            _log($"    (warning) Could not open Supabase connection for staging cleanup: {ex.Message}");
+            return;
         }
 
-        await writer.CompleteAsync();
-        return count;
+        foreach (var spec in specs)
+        {
+            try
+            {
+                await using var cmd = new NpgsqlCommand(
+                    $"TRUNCATE TABLE {spec.TargetTable}_staging",
+                    target);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                _log($"    (warning) Could not clear {spec.TargetTable}_staging: {ex.Message}");
+            }
+        }
+    }
+
+    private static int ReadPositiveIntEnvironment(
+        string name,
+        int defaultValue,
+        int min,
+        int max)
+    {
+        string? raw = Environment.GetEnvironmentVariable(name);
+        if (int.TryParse(raw, out int value) && value >= min && value <= max)
+        {
+            return value;
+        }
+
+        return defaultValue;
     }
 }
