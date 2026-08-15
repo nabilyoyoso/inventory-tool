@@ -1256,6 +1256,146 @@ function setPrintType(type) {
 // ---- Generate report ----
 els.btnGenerate.addEventListener('click', generateReport);
 
+async function runStoreWiseForOneStore(asOfDate, storeCode, categories, subCategories) {
+  const params = {
+    as_of_date: asOfDate,
+    p_store_codes: [storeCode],
+    p_category: categories,
+    p_sub_category: subCategories,
+  };
+
+  let lastError = null;
+
+  // A single-store RPC is intentionally used here. The database functions
+  // already push p_store_codes down into their source calculations. This
+  // avoids sending one large All-Stores RPC through the browser/PostgREST
+  // request path, which has a hard request-time ceiling.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { data, error } = await supabase.rpc('get_store_wise_report', params);
+
+    if (!error) {
+      return { data: data || [], error: null };
+    }
+
+    lastError = error;
+
+    // Retry only once. This is for transient gateway/database pressure; it
+    // does not hide a persistent SQL error.
+    if (attempt === 1) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+  }
+
+  return { data: [], error: lastError };
+}
+
+async function getAllStoreCodesForStoreWise() {
+  const { data, error } = await supabase
+    .from('store')
+    .select('store_code, store_name')
+    .order('store_name');
+
+  if (error) {
+    return { stores: [], error };
+  }
+
+  return {
+    stores: (data || []).filter(row => row.store_code),
+    error: null,
+  };
+}
+
+async function runStoreWiseSplit(asOfDate, selectedStoreCodes, categories, subCategories) {
+  let stores;
+
+  if (selectedStoreCodes && selectedStoreCodes.length > 0) {
+    // Preserve the user's explicit selection. Each selected store gets its
+    // own small RPC instead of one multi-store RPC.
+    stores = selectedStoreCodes.map(store_code => ({ store_code, store_name: store_code }));
+  } else {
+    const storeResult = await getAllStoreCodesForStoreWise();
+    if (storeResult.error) {
+      return {
+        rows: [],
+        error: storeResult.error,
+        failedStore: null,
+      };
+    }
+    stores = storeResult.stores;
+  }
+
+  if (stores.length === 0) {
+    return { rows: [], error: null, failedStore: null };
+  }
+
+  const rowsByIndex = new Array(stores.length);
+  const failures = [];
+
+  // Keep concurrency deliberately small. Eleven independent report calls at
+  // once would simply move the bottleneck from one large request to a burst
+  // of database work. Three at a time gives each store a small request while
+  // avoiding an unnecessary connection/query spike.
+  const concurrency = 3;
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= stores.length) return;
+
+      const store = stores[index];
+      setStatus(`Generating Store Wise report… ${index + 1}/${stores.length}`);
+
+      const result = await runStoreWiseForOneStore(
+        asOfDate,
+        store.store_code,
+        categories,
+        subCategories
+      );
+
+      if (result.error) {
+        failures.push({
+          index,
+          storeCode: store.store_code,
+          storeName: store.store_name || store.store_code,
+          error: result.error,
+        });
+        continue;
+      }
+
+      rowsByIndex[index] = result.data;
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, stores.length) },
+      () => worker()
+    )
+  );
+
+  if (failures.length > 0) {
+    failures.sort((a, b) => a.index - b.index);
+    const first = failures[0];
+    return {
+      rows: [],
+      error: first.error,
+      failedStore: first.storeName,
+      failures,
+    };
+  }
+
+  // Preserve the store-list order. A store with genuinely no report rows is
+  // simply omitted, matching the existing SQL report's behavior.
+  return {
+    rows: rowsByIndex.flat(),
+    error: null,
+    failedStore: null,
+    failures: [],
+  };
+}
+
+// ---- Generate report ----
 async function generateReport() {
   const asOfDate = els.date.value;
   if (!asOfDate) { setStatus('Pick a date first.', true); return; }
@@ -1276,41 +1416,85 @@ async function generateReport() {
       barcode: 'get_barcode_wise_report',
       sale_barcode: 'get_sale_barcode_wise_report',
     };
-    // Only get_sale_barcode_wise_report accepts p_search — get_store_wise_report
-    // and get_barcode_wise_report take exactly 4 parameters. Sending p_search
-    // (even as null) to either of those makes PostgREST reject the call with
-    // "Could not find the function ... in the schema cache", since it can't
-    // match an unknown parameter name to any overload. See PROJECT_HANDOFF.md
-    // Section 7 item 12 / Section 12.
-    const params = {
-      as_of_date: asOfDate,
-      p_store_codes: storeCodes,
-      p_category: categories,
-      p_sub_category: subCategories,
-    };
-    // Point 18 is intentionally kept correct: p_search is sent ONLY to the
-    // Sale_Barcode RPC, which is the only function that accepts that parameter.
-    if (reportType === 'sale_barcode') {
-      params.p_search = searchTerm;
-    }
 
-    const { data, error } = await supabase.rpc(fnMap[reportType], params);
+    let data;
+    let error;
 
-    if (error) {
-      const message = error.message || 'Unknown report error';
-      const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
-      const userMessage = timeoutLike
-        ? 'Report timed out before Supabase returned the result. The Store Wise path has been optimized; if this persists, test one store first and then all stores.'
-        : message;
-      setStatus('Report failed: ' + userMessage, true);
-      renderInto(els.results, null, 'Report failed', userMessage);
-      console.error('Report RPC failure:', error);
-      return;
+    if (reportType === 'store') {
+      /*
+       * IMPORTANT:
+       *
+       * Do not call get_store_wise_report() once with p_store_codes = NULL
+       * for the All Stores case. That was the request that repeatedly hit
+       * the upstream timeout shown in the UI and in the Supabase SQL Editor.
+       *
+       * Instead, All Stores and multi-store selections are split into small
+       * one-store RPC calls. The database remains the source of truth; the
+       * frontend only combines the returned store rows.
+       */
+      const splitResult = await runStoreWiseSplit(
+        asOfDate,
+        storeCodes,
+        categories,
+        subCategories
+      );
+
+      data = splitResult.rows;
+      error = splitResult.error;
+
+      if (error) {
+        const message = error.message || 'Unknown Store Wise report error';
+        const storeSuffix = splitResult.failedStore
+          ? ` Failed store: ${splitResult.failedStore}.`
+          : '';
+        const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
+        const userMessage = timeoutLike
+          ? `Store Wise report timed out while processing one store.${storeSuffix}`
+          : `Store Wise report failed.${storeSuffix} ${message}`;
+
+        setStatus(userMessage, true);
+        renderInto(els.results, null, 'Report failed', userMessage);
+        console.error('Store Wise split RPC failure:', error, splitResult.failures || []);
+        return;
+      }
+    } else {
+      // Barcode Wise and Sale_Barcode Wise retain their existing single-RPC
+      // behavior. Only Sale_Barcode Wise accepts p_search.
+      const params = {
+        as_of_date: asOfDate,
+        p_store_codes: storeCodes,
+        p_category: categories,
+        p_sub_category: subCategories,
+      };
+
+      if (reportType === 'sale_barcode') {
+        params.p_search = searchTerm;
+      }
+
+      const result = await supabase.rpc(fnMap[reportType], params);
+      data = result.data;
+      error = result.error;
+
+      if (error) {
+        const message = error.message || 'Unknown report error';
+        const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
+        const userMessage = timeoutLike
+          ? 'Report timed out before Supabase returned the result.'
+          : message;
+        setStatus('Report failed: ' + userMessage, true);
+        renderInto(els.results, null, 'Report failed', userMessage);
+        console.error('Report RPC failure:', error);
+        return;
+      }
     }
 
     currentRows = data || [];
     currentColumns = getColumns(reportType);
-    currentSheetLabel = { store: 'Store Wise', barcode: 'Barcode Wise', sale_barcode: 'Sale_Barcode Wise' }[reportType];
+    currentSheetLabel = {
+      store: 'Store Wise',
+      barcode: 'Barcode Wise',
+      sale_barcode: 'Sale_Barcode Wise'
+    }[reportType];
 
     if (currentRows.length === 0) {
       setStatus(`No stock found for ${formatReportDate(asOfDate)}.`);
@@ -1321,21 +1505,24 @@ async function generateReport() {
 
     // Only Store Wise renders into the on-screen grid, with a grand-total
     // row summing every numeric column. Barcode Wise and Sale_Barcode Wise
-    // are export/PDF-only: the data is fetched and held in
-    // currentRows/currentColumns exactly the same way, so Export and Preview
-    // PDF work immediately — they just never get painted into the table.
+    // are export/PDF-only.
     if (reportType === 'store') {
       setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} — as of ${formatReportDate(asOfDate)}.`);
       renderInto(els.results, currentColumns, null, null, currentRows, { showGrandTotal: true });
     } else {
       setStatus(`${currentRows.length} row${currentRows.length === 1 ? '' : 's'} ready — as of ${formatReportDate(asOfDate)}. ${currentSheetLabel} isn't shown on screen; use Export or Preview PDF below.`);
-      renderInto(els.results, null, 'Report ready for export',
-        `${currentRows.length} row${currentRows.length === 1 ? '' : 's'} generated for ${currentSheetLabel}. This report type is export/PDF only — use the Export or Preview PDF button below.`);
+      renderInto(
+        els.results,
+        null,
+        'Report ready for export',
+        `${currentRows.length} row${currentRows.length === 1 ? '' : 's'} generated for ${currentSheetLabel}. This report type is export/PDF only — use the Export or Preview PDF button below.`
+      );
     }
+
     els.btnExport.disabled = false;
   } finally {
-    // Always runs — success, empty result, or thrown error — so the UI can
-    // never get stuck locked behind the loading overlay.
+    // Always runs — success, empty result, or error — so the UI can never
+    // remain locked behind the loading overlay.
     setLoading(false);
     hideLoadingOverlay();
   }
