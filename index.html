@@ -732,6 +732,15 @@ function showApp() {
 // ---- Sync / Reload button + sync info panel ----
 const SYNC_TRIGGER_URL = 'https://inventory-sync-service.onrender.com/trigger-sync';
 const SYNC_STATUS_URL = 'https://inventory-sync-service.onrender.com/sync-status';
+let trackedSyncRunId = null;
+
+function syncStatusUrl(runId = null, after = null) {
+  const params = new URLSearchParams();
+  if (runId) params.set('run_id', String(runId));
+  if (after) params.set('after', after);
+  const query = params.toString();
+  return query ? `${SYNC_STATUS_URL}?${query}` : SYNC_STATUS_URL;
+}
 
 document.getElementById('btnRefreshSync').addEventListener('click', async () => {
   const btn = document.getElementById('btnRefreshSync');
@@ -740,55 +749,113 @@ document.getElementById('btnRefreshSync').addEventListener('click', async () => 
 
   try {
     const { data: { session } } = await supabase.auth.getSession();
-    if (!session) { showToast('You need to be signed in to sync.', 'error'); btn.disabled = false; btn.textContent = 'Sync / Reload'; return; }
+    if (!session) {
+      showToast('You need to be signed in to sync.', 'error');
+      btn.disabled = false;
+      btn.textContent = 'Sync / Reload';
+      return;
+    }
 
-    const resp = await fetch(SYNC_TRIGGER_URL, { headers: { Authorization: `Bearer ${session.access_token}` } });
+    const triggerStartedAt = new Date().toISOString();
+    const resp = await fetch(SYNC_TRIGGER_URL, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
 
     if (resp.status !== 202) {
       const text = await resp.text();
       showToast('Could not start sync — check with your admin.', 'error');
       console.error('Sync start failure detail:', text);
-      btn.disabled = false; btn.textContent = 'Sync / Reload';
+      btn.disabled = false;
+      btn.textContent = 'Sync / Reload';
       return;
     }
 
-    showToast('Sync running in the background — this can take a few minutes…', 'success', 4000);
+    const payload = await resp.json();
+    trackedSyncRunId = payload.runId || null;
+
+    showToast(
+      trackedSyncRunId
+        ? `Sync started (run ${trackedSyncRunId}). This page will track that exact run.`
+        : 'Sync dispatched. Waiting for GitHub to assign the run ID…',
+      'success',
+      5000
+    );
     btn.textContent = 'Syncing…';
     setSyncPill('syncing');
-    await pollSyncStatus(btn);
+
+    await pollSyncStatus(btn, trackedSyncRunId, triggerStartedAt);
   } catch (err) {
-    showToast('Could not reach the sync service: ' + err.message, 'error');
-    btn.disabled = false; btn.textContent = 'Sync / Reload';
+    showToast('Could not reach the sync service: ' + (err?.message || err), 'error');
+    btn.disabled = false;
+    btn.textContent = 'Sync / Reload';
   }
 });
 
-async function pollSyncStatus(btn) {
-  const maxWaitMs = 10 * 60 * 1000;
+async function pollSyncStatus(btn, runId, triggerStartedAt) {
   const intervalMs = 4000;
-  const startedAt = Date.now();
+  let consecutiveErrors = 0;
 
-  while (Date.now() - startedAt < maxWaitMs) {
+  // There is intentionally no fixed 10-minute cutoff. The GitHub workflow
+  // has its own 30-minute execution ceiling, and queued runs may legitimately
+  // wait behind another run. We keep tracking the exact run until GitHub says
+  // it is completed instead of reporting a false timeout to the user.
+  while (true) {
     await new Promise(r => setTimeout(r, intervalMs));
-    let status;
-    try { const resp = await fetch(SYNC_STATUS_URL); status = await resp.json(); } catch { continue; }
 
-    if (!status.isRunning) {
+    try {
+      const url = runId
+        ? syncStatusUrl(runId)
+        : syncStatusUrl(null, triggerStartedAt);
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`status HTTP ${resp.status}`);
+      const status = await resp.json();
+      consecutiveErrors = 0;
+
+      if (status.runId && !runId) {
+        runId = status.runId;
+        trackedSyncRunId = runId;
+      }
+
+      if (status.waitingForRunId) {
+        btn.textContent = 'Sync queued…';
+        continue;
+      }
+
       applySyncStatus(status);
-      showToast(status.lastSuccess === true
-        ? 'Sync completed successfully — data is up to date.'
-        : 'Sync finished with errors — no data was changed. Check the Actions tab on GitHub for details.',
-        status.lastSuccess === true ? 'success' : 'error');
-      btn.disabled = false; btn.textContent = 'Sync / Reload';
-      return;
+
+      if (!status.isRunning) {
+        showToast(
+          status.lastSuccess === true
+            ? 'Sync completed successfully — data is up to date.'
+            : 'Sync finished with errors — no data was changed. Check the Actions tab on GitHub for details.',
+          status.lastSuccess === true ? 'success' : 'error'
+        );
+        btn.disabled = false;
+        btn.textContent = 'Sync / Reload';
+        trackedSyncRunId = null;
+        return;
+      }
+
+      btn.textContent = status.status === 'queued' ? 'Sync queued…' : 'Syncing…';
+    } catch (err) {
+      consecutiveErrors++;
+      if (consecutiveErrors === 3) {
+        showToast('Sync status service is temporarily unavailable. The sync itself is still being tracked.', 'error', 6000);
+      }
+      // Do not unlock the button on a transient status failure. That could
+      // trigger a second sync while the first one is still running.
     }
   }
-  showToast('Still running — check back in a bit. This will finish on its own.', 'error');
-  btn.disabled = false; btn.textContent = 'Sync / Reload';
 }
 
 async function loadSyncStatus() {
-  try { const resp = await fetch(SYNC_STATUS_URL); applySyncStatus(await resp.json()); }
-  catch { setSyncPill('neutral', 'Status unavailable'); }
+  try {
+    const resp = await fetch(syncStatusUrl());
+    if (!resp.ok) throw new Error(`status HTTP ${resp.status}`);
+    applySyncStatus(await resp.json());
+  } catch {
+    setSyncPill('neutral', 'Status unavailable');
+  }
 }
 setInterval(loadSyncStatus, 60000);
 
@@ -853,7 +920,11 @@ let allCategoriesForAdmin = [];
 
 async function checkAdminAndShowButton() {
   const { data, error } = await supabase.rpc('fn_is_admin');
-  if (!error && data === true) {
+  if (error) {
+    console.error('Admin check failed:', error);
+    return;
+  }
+  if (data === true) {
     document.getElementById('btnManageAccess').style.display = 'inline-flex';
   }
 }
@@ -871,28 +942,44 @@ function closeAccessModal() {
 
 async function loadAccessModalData() {
   const body = document.getElementById('accessModalBody');
-  body.innerHTML = '<p class="status-line">Loading…</p>';
+  body.innerHTML = '<p class="status-line">Loading users and category access…</p>';
 
-  const [usersRes, accessRes, catsRes] = await Promise.all([
+  const results = await Promise.allSettled([
     supabase.rpc('admin_list_users'),
     supabase.rpc('admin_get_category_access'),
     supabase.rpc('admin_get_all_categories'),
   ]);
 
-  const firstError = usersRes.error || accessRes.error || catsRes.error;
-  if (firstError) {
-    body.innerHTML = `<p class="status-line error">Could not load access data: ${firstError.message}</p>`;
+  const [usersResult, accessResult, categoriesResult] = results;
+  const failures = [];
+
+  if (usersResult.status === 'rejected') failures.push('user list request failed');
+  else if (usersResult.value.error) failures.push('user list: ' + usersResult.value.error.message);
+
+  if (accessResult.status === 'rejected') failures.push('access list request failed');
+  else if (accessResult.value.error) failures.push('access list: ' + accessResult.value.error.message);
+
+  if (categoriesResult.status === 'rejected') failures.push('category list request failed');
+  else if (categoriesResult.value.error) failures.push('category list: ' + categoriesResult.value.error.message);
+
+  if (failures.length > 0) {
+    body.innerHTML = `<p class="status-line error">Could not load Manage Access data. ${failures.join(' | ')}</p>`;
+    console.error('Manage Access load failures:', failures);
     return;
   }
 
-  allCategoriesForAdmin = (catsRes.data || []).map(c => c.category);
+  const users = usersResult.value.data || [];
+  const accessRows = accessResult.value.data || [];
+  const categoryRows = categoriesResult.value.data || [];
+
+  allCategoriesForAdmin = categoryRows.map(c => c.category).filter(Boolean);
 
   const accessByUser = {};
-  for (const row of accessRes.data || []) {
+  for (const row of accessRows) {
     (accessByUser[row.user_id] ??= []).push(row.category);
   }
 
-  renderAccessRows(usersRes.data || [], accessByUser);
+  renderAccessRows(users, accessByUser);
 }
 
 function renderAccessRows(users, accessByUser) {
@@ -1075,18 +1162,53 @@ const subCategoryDropdown = createDropdown({ mountEl: document.getElementById('d
 
 async function loadStores() {
   const { data, error } = await supabase.from('store').select('store_code, store_name').order('store_name');
-  if (error) { setStatus('Could not load the store list: ' + error.message, true); return; }
+  if (error) {
+    storeDropdown.setOptions([]);
+    setStatus('Could not load the store list: ' + error.message, true);
+    console.error('Store load failure:', error);
+    return;
+  }
   storeDropdown.setOptions((data || []).map(s => ({ value: s.store_code, label: s.store_name })));
 }
 
 async function loadCategories() {
-  const [catRes, subRes] = await Promise.all([
-    supabase.rpc('get_distinct_categories'),
-    supabase.rpc('get_distinct_sub_categories'),
-  ]);
-  if (!catRes.error) categoryDropdown.setOptions((catRes.data || []).map(c => ({ value: c.category, label: c.category })));
-  if (!subRes.error) subCategoryDropdown.setOptions((subRes.data || []).map(c => ({ value: c.sub_category, label: c.sub_category })));
+  const { data, error } = await supabase.rpc('get_distinct_categories');
+  if (error) {
+    categoryDropdown.setOptions([]);
+    subCategoryDropdown.setOptions([]);
+    setStatus('Could not load categories: ' + error.message, true);
+    console.error('Category load failure:', error);
+    return;
+  }
+
+  categoryDropdown.setOptions((data || []).map(c => ({ value: c.category, label: c.category })));
+  await loadSubCategoriesForSelectedCategories();
 }
+
+async function loadSubCategoriesForSelectedCategories() {
+  const categories = categoryDropdown.getValue();
+  subCategoryDropdown.reset();
+
+  const { data, error } = await supabase.rpc('get_distinct_sub_categories_for_categories', {
+    p_category: categories,
+  });
+
+  if (error) {
+    subCategoryDropdown.setOptions([]);
+    setStatus('Could not load sub-categories: ' + error.message, true);
+    console.error('Sub-category load failure:', error);
+    return;
+  }
+
+  subCategoryDropdown.setOptions((data || []).map(c => ({
+    value: c.sub_category,
+    label: c.sub_category,
+  })));
+}
+
+categoryDropdown.onChange(() => {
+  loadSubCategoriesForSelectedCategories();
+});
 
 let reportType = 'store'; // 'store' | 'barcode' | 'sale_barcode'
 let printType = 'excel';  // 'excel' | 'pdf'
@@ -1166,6 +1288,8 @@ async function generateReport() {
       p_category: categories,
       p_sub_category: subCategories,
     };
+    // Point 18 is intentionally kept correct: p_search is sent ONLY to the
+    // Sale_Barcode RPC, which is the only function that accepts that parameter.
     if (reportType === 'sale_barcode') {
       params.p_search = searchTerm;
     }
@@ -1173,8 +1297,14 @@ async function generateReport() {
     const { data, error } = await supabase.rpc(fnMap[reportType], params);
 
     if (error) {
-      setStatus('Report failed: ' + error.message, true);
-      renderInto(els.results, null, 'Report failed', error.message);
+      const message = error.message || 'Unknown report error';
+      const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
+      const userMessage = timeoutLike
+        ? 'Report timed out before Supabase returned the result. The Store Wise path has been optimized; if this persists, test one store first and then all stores.'
+        : message;
+      setStatus('Report failed: ' + userMessage, true);
+      renderInto(els.results, null, 'Report failed', userMessage);
+      console.error('Report RPC failure:', error);
       return;
     }
 
