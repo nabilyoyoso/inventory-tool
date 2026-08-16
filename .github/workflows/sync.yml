@@ -112,28 +112,41 @@ jobs:
       - name: Commit schema files safely
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # BUGFIX (2026-08-16): the two dump steps above write schema.sql and
+        # database_schema.sql to disk *before* this step ever runs, which
+        # means the working tree already has unstaged changes the moment
+        # this step starts. `git rebase` refuses to run against a dirty
+        # tree — that's a hard, deterministic Git rule, not a flaky
+        # occasional failure — which is exactly why every one of the 5
+        # retry attempts failed with the identical "You have unstaged
+        # changes" error in the same run. The fix is ordering: commit the
+        # dumped files locally FIRST (which cleans the tree), and only
+        # then fetch/rebase/push in the retry loop. On a push race, this
+        # also now re-rebases onto the new tip instead of the old code's
+        # `git reset --hard origin/main`, which would have silently
+        # thrown away the schema commit it had just made.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add schema.sql database_schema.sql
+
+          if git diff --cached --quiet; then
+            echo "Schema files unchanged — nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: auto-sync Supabase schema [skip ci]"
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
 
             if ! git rebase origin/main; then
               git rebase --abort || true
-              echo "Main changed while preparing the schema commit; retrying."
+              echo "Main changed while preparing the schema commit; retrying (attempt $attempt/5)."
               sleep $((attempt * 2))
               continue
             fi
-
-            git add schema.sql database_schema.sql
-
-            if git diff --cached --quiet; then
-              echo "Schema files unchanged — nothing to commit."
-              exit 0
-            fi
-
-            git commit -m "chore: auto-sync Supabase schema [skip ci]"
 
             if git push origin HEAD:main; then
               echo "Schema files committed successfully."
@@ -141,7 +154,6 @@ jobs:
             fi
 
             echo "Push race detected; retrying after refreshing main (attempt $attempt/5)."
-            git reset --hard origin/main
             sleep $((attempt * 2))
           done
 
