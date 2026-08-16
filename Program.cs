@@ -148,6 +148,20 @@ class SyncRunner
 {
     private const int DefaultOverlapDays = 30;
     private const int DefaultSourceCommandTimeoutSeconds = 600;
+    // BUGFIX (2026-08-16): every NpgsqlCommand run against Supabase in this
+    // file used to rely on Npgsql's built-in default CommandTimeout, which
+    // is 30 seconds. That's fine for small master tables, but the sync log
+    // showed the swap succeeding for store (11 rows), product_file (17,333),
+    // product_stock (18,748), and purchase_rcv_details (28,114 rows) —
+    // then failing with "Exception while reading from stream" on the very
+    // next table, store_delivery_details, which had 200,745 rows staged.
+    // That's the exact signature of a command being aborted mid-flight by a
+    // 30-second client-side timeout, not a real database error. Setting
+    // CommandTimeout on the connection string (rather than per-command)
+    // means every command opened against Supabase in this file — CREATE
+    // TABLE, TRUNCATE, INSERT, DELETE, the sync_log upsert — inherits the
+    // same generous timeout automatically.
+    private const int DefaultTargetCommandTimeoutSeconds = 600;
     private const string AdvisoryLockSql =
         "SELECT pg_advisory_lock(hashtextextended('yoyoso_inventory_sync', 0));";
 
@@ -171,19 +185,11 @@ class SyncRunner
     private readonly Action<string> _log;
     private readonly int _overlapDays;
     private readonly int _sourceCommandTimeoutSeconds;
+    private readonly int _targetCommandTimeoutSeconds;
 
     public SyncRunner(string sourceConnStr, string targetConnStr, Action<string> log)
     {
         _sourceConnStr = sourceConnStr;
-
-        // This is a short-lived batch job. Pooling is intentionally disabled so
-        // a broken connection from a failed COPY can never poison the next
-        // table's connection.
-        var csBuilder = new NpgsqlConnectionStringBuilder(targetConnStr)
-        {
-            Pooling = false
-        };
-        _targetConnStr = csBuilder.ConnectionString;
         _log = log;
 
         _overlapDays = ReadPositiveIntEnvironment("SYNC_OVERLAP_DAYS", DefaultOverlapDays, 1, 365);
@@ -192,6 +198,23 @@ class SyncRunner
             DefaultSourceCommandTimeoutSeconds,
             60,
             1800);
+        _targetCommandTimeoutSeconds = ReadPositiveIntEnvironment(
+            "SUPABASE_COMMAND_TIMEOUT_SECONDS",
+            DefaultTargetCommandTimeoutSeconds,
+            60,
+            1800);
+
+        // This is a short-lived batch job. Pooling is intentionally disabled so
+        // a broken connection from a failed COPY can never poison the next
+        // table's connection. CommandTimeout is set here too, so it applies to
+        // every command opened against this connection string without having
+        // to remember to set it at each call site.
+        var csBuilder = new NpgsqlConnectionStringBuilder(targetConnStr)
+        {
+            Pooling = false,
+            CommandTimeout = _targetCommandTimeoutSeconds,
+        };
+        _targetConnStr = csBuilder.ConnectionString;
     }
 
     // Opens a Postgres connection and explicitly resets search_path to
@@ -211,7 +234,7 @@ class SyncRunner
         await OpenPgAsync(lockConnection);
         await AcquireAdvisoryLockAsync(lockConnection);
 
-        _log($"--- PostgreSQL sync lock acquired. Incremental overlap: {_overlapDays} day(s). ---");
+        _log($"--- PostgreSQL sync lock acquired. Incremental overlap: {_overlapDays} day(s). Supabase command timeout: {_targetCommandTimeoutSeconds}s. ---");
 
         var staged = new List<(TableSpec spec, int rowCount, DateTime cutoff)>();
 
