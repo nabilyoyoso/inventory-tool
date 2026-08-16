@@ -1256,146 +1256,21 @@ function setPrintType(type) {
 // ---- Generate report ----
 els.btnGenerate.addEventListener('click', generateReport);
 
-async function runStoreWiseForOneStore(asOfDate, storeCode, categories, subCategories) {
-  const params = {
-    as_of_date: asOfDate,
-    p_store_codes: [storeCode],
-    p_category: categories,
-    p_sub_category: subCategories,
-  };
+// NOTE (2026-08-15): This used to split "All Stores" / multi-store Store
+// Wise requests into one small RPC call per store (see git history /
+// PROJECT_HANDOFF.md section 10, "Failed attempt C"). That approach was
+// already tried once before, confirmed bad — each per-store call was
+// still expensive on its own, so splitting just multiplied the total work
+// and left the report stuck generating for minutes. It has been removed.
+//
+// The actual bottleneck was on the database side: get_store_wise_report
+// was silently computing a full stock-age window-function chain for every
+// row and then throwing the result away, since Store Wise never displays
+// stock age at all. That's fixed directly in
+// 008_fix_report_timeout_and_missing_subcategory_fn.sql. With that fix
+// applied, a single multi-store (or All Stores) RPC call is the correct
+// approach again, exactly like Barcode Wise and Sale_Barcode Wise below.
 
-  let lastError = null;
-
-  // A single-store RPC is intentionally used here. The database functions
-  // already push p_store_codes down into their source calculations. This
-  // avoids sending one large All-Stores RPC through the browser/PostgREST
-  // request path, which has a hard request-time ceiling.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const { data, error } = await supabase.rpc('get_store_wise_report', params);
-
-    if (!error) {
-      return { data: data || [], error: null };
-    }
-
-    lastError = error;
-
-    // Retry only once. This is for transient gateway/database pressure; it
-    // does not hide a persistent SQL error.
-    if (attempt === 1) {
-      await new Promise(resolve => setTimeout(resolve, 1200));
-    }
-  }
-
-  return { data: [], error: lastError };
-}
-
-async function getAllStoreCodesForStoreWise() {
-  const { data, error } = await supabase
-    .from('store')
-    .select('store_code, store_name')
-    .order('store_name');
-
-  if (error) {
-    return { stores: [], error };
-  }
-
-  return {
-    stores: (data || []).filter(row => row.store_code),
-    error: null,
-  };
-}
-
-async function runStoreWiseSplit(asOfDate, selectedStoreCodes, categories, subCategories) {
-  let stores;
-
-  if (selectedStoreCodes && selectedStoreCodes.length > 0) {
-    // Preserve the user's explicit selection. Each selected store gets its
-    // own small RPC instead of one multi-store RPC.
-    stores = selectedStoreCodes.map(store_code => ({ store_code, store_name: store_code }));
-  } else {
-    const storeResult = await getAllStoreCodesForStoreWise();
-    if (storeResult.error) {
-      return {
-        rows: [],
-        error: storeResult.error,
-        failedStore: null,
-      };
-    }
-    stores = storeResult.stores;
-  }
-
-  if (stores.length === 0) {
-    return { rows: [], error: null, failedStore: null };
-  }
-
-  const rowsByIndex = new Array(stores.length);
-  const failures = [];
-
-  // Keep concurrency deliberately small. Eleven independent report calls at
-  // once would simply move the bottleneck from one large request to a burst
-  // of database work. Three at a time gives each store a small request while
-  // avoiding an unnecessary connection/query spike.
-  const concurrency = 3;
-  let nextIndex = 0;
-
-  async function worker() {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= stores.length) return;
-
-      const store = stores[index];
-      setStatus(`Generating Store Wise report… ${index + 1}/${stores.length}`);
-
-      const result = await runStoreWiseForOneStore(
-        asOfDate,
-        store.store_code,
-        categories,
-        subCategories
-      );
-
-      if (result.error) {
-        failures.push({
-          index,
-          storeCode: store.store_code,
-          storeName: store.store_name || store.store_code,
-          error: result.error,
-        });
-        continue;
-      }
-
-      rowsByIndex[index] = result.data;
-    }
-  }
-
-  await Promise.all(
-    Array.from(
-      { length: Math.min(concurrency, stores.length) },
-      () => worker()
-    )
-  );
-
-  if (failures.length > 0) {
-    failures.sort((a, b) => a.index - b.index);
-    const first = failures[0];
-    return {
-      rows: [],
-      error: first.error,
-      failedStore: first.storeName,
-      failures,
-    };
-  }
-
-  // Preserve the store-list order. A store with genuinely no report rows is
-  // simply omitted, matching the existing SQL report's behavior.
-  return {
-    rows: rowsByIndex.flat(),
-    error: null,
-    failedStore: null,
-    failures: [],
-  };
-}
-
-// ---- Generate report ----
 async function generateReport() {
   const asOfDate = els.date.value;
   if (!asOfDate) { setStatus('Pick a date first.', true); return; }
@@ -1417,75 +1292,33 @@ async function generateReport() {
       sale_barcode: 'get_sale_barcode_wise_report',
     };
 
-    let data;
-    let error;
+    // All three report types use one RPC call with the same four base
+    // parameters. Only Sale_Barcode Wise additionally accepts p_search.
+    const params = {
+      as_of_date: asOfDate,
+      p_store_codes: storeCodes,
+      p_category: categories,
+      p_sub_category: subCategories,
+    };
 
-    if (reportType === 'store') {
-      /*
-       * IMPORTANT:
-       *
-       * Do not call get_store_wise_report() once with p_store_codes = NULL
-       * for the All Stores case. That was the request that repeatedly hit
-       * the upstream timeout shown in the UI and in the Supabase SQL Editor.
-       *
-       * Instead, All Stores and multi-store selections are split into small
-       * one-store RPC calls. The database remains the source of truth; the
-       * frontend only combines the returned store rows.
-       */
-      const splitResult = await runStoreWiseSplit(
-        asOfDate,
-        storeCodes,
-        categories,
-        subCategories
-      );
+    if (reportType === 'sale_barcode') {
+      params.p_search = searchTerm;
+    }
 
-      data = splitResult.rows;
-      error = splitResult.error;
+    const result = await supabase.rpc(fnMap[reportType], params);
+    const data = result.data;
+    const error = result.error;
 
-      if (error) {
-        const message = error.message || 'Unknown Store Wise report error';
-        const storeSuffix = splitResult.failedStore
-          ? ` Failed store: ${splitResult.failedStore}.`
-          : '';
-        const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
-        const userMessage = timeoutLike
-          ? `Store Wise report timed out while processing one store.${storeSuffix}`
-          : `Store Wise report failed.${storeSuffix} ${message}`;
-
-        setStatus(userMessage, true);
-        renderInto(els.results, null, 'Report failed', userMessage);
-        console.error('Store Wise split RPC failure:', error, splitResult.failures || []);
-        return;
-      }
-    } else {
-      // Barcode Wise and Sale_Barcode Wise retain their existing single-RPC
-      // behavior. Only Sale_Barcode Wise accepts p_search.
-      const params = {
-        as_of_date: asOfDate,
-        p_store_codes: storeCodes,
-        p_category: categories,
-        p_sub_category: subCategories,
-      };
-
-      if (reportType === 'sale_barcode') {
-        params.p_search = searchTerm;
-      }
-
-      const result = await supabase.rpc(fnMap[reportType], params);
-      data = result.data;
-      error = result.error;
-
-      if (error) {
-        const message = error.message || 'Unknown report error';
-        const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
-        const userMessage = timeoutLike
-          ? 'Report timed out before Supabase returned the result.'
-          : message;
-        setStatus('Report failed: ' + userMessage, true);
-        renderInto(els.results, null, 'Report failed', userMessage);
-        console.error('Report RPC failure:', error);
-        return;
-      }
+    if (error) {
+      const message = error.message || 'Unknown report error';
+      const timeoutLike = /upstream request timeout|statement timeout|timeout/i.test(message);
+      const userMessage = timeoutLike
+        ? 'Report timed out before Supabase returned the result.'
+        : message;
+      setStatus('Report failed: ' + userMessage, true);
+      renderInto(els.results, null, 'Report failed', userMessage);
+      console.error('Report RPC failure:', error);
+      return;
     }
 
     currentRows = data || [];
