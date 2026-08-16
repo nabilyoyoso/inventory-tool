@@ -151,6 +151,21 @@ class SyncRunner
     private const string AdvisoryLockSql =
         "SELECT pg_advisory_lock(hashtextextended('yoyoso_inventory_sync', 0));";
 
+    // BUGFIX (2026-08-15): every table reference in this file used to be
+    // unqualified (e.g. "store_staging" instead of "public.store_staging").
+    // That relied entirely on the connecting role's search_path resolving to
+    // "public" on its own. Against Supabase's pooled connection string that
+    // resolution isn't guaranteed to happen the same way every session, and
+    // when it doesn't, Postgres raises 3F000 "no schema has been selected to
+    // create in" on the very first CREATE TABLE — which is exactly the error
+    // seen in the failed GitHub Actions run. Schema-qualifying every
+    // reference removes the dependency on search_path entirely, and
+    // SET search_path is issued defensively on every connection as a second
+    // layer of protection.
+    private const string Schema = "public";
+
+    private static string Qualified(string tableName) => $"{Schema}.{tableName}";
+
     private readonly string _sourceConnStr;
     private readonly string _targetConnStr;
     private readonly Action<string> _log;
@@ -179,10 +194,21 @@ class SyncRunner
             1800);
     }
 
+    // Opens a Postgres connection and explicitly resets search_path to
+    // "public" before any other statement runs on it. Belt-and-suspenders
+    // alongside schema-qualifying every table reference below — either one
+    // alone would have prevented the 3F000 failure seen in the sync log.
+    private static async Task OpenPgAsync(NpgsqlConnection conn)
+    {
+        await conn.OpenAsync();
+        await using var setPath = new NpgsqlCommand("SET search_path TO public;", conn);
+        await setPath.ExecuteNonQueryAsync();
+    }
+
     public async Task<bool> RunFullSyncAsync(List<TableSpec> specs)
     {
         await using var lockConnection = new NpgsqlConnection(_targetConnStr);
-        await lockConnection.OpenAsync();
+        await OpenPgAsync(lockConnection);
         await AcquireAdvisoryLockAsync(lockConnection);
 
         _log($"--- PostgreSQL sync lock acquired. Incremental overlap: {_overlapDays} day(s). ---");
@@ -238,7 +264,7 @@ class SyncRunner
         _log("--- All tables staged successfully. Swapping into place... ---");
 
         await using var target = new NpgsqlConnection(_targetConnStr);
-        await target.OpenAsync();
+        await OpenPgAsync(target);
         await using var targetTx = await target.BeginTransactionAsync();
 
         try
@@ -246,27 +272,29 @@ class SyncRunner
             foreach (var (spec, rowCount, cutoff) in staged)
             {
                 string colList = string.Join(", ", spec.Columns);
+                string qualifiedTarget = Qualified(spec.TargetTable);
+                string qualifiedStaging = Qualified($"{spec.TargetTable}_staging");
 
                 if (spec.Kind == TableKind.Master)
                 {
-                    await ExecAsync(target, targetTx, $"TRUNCATE TABLE {spec.TargetTable}");
+                    await ExecAsync(target, targetTx, $"TRUNCATE TABLE {qualifiedTarget}");
                     await ExecAsync(
                         target,
                         targetTx,
-                        $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
+                        $"INSERT INTO {qualifiedTarget} ({colList}) SELECT {colList} FROM {qualifiedStaging}");
                 }
                 else
                 {
                     await ExecAsync(
                         target,
                         targetTx,
-                        $"DELETE FROM {spec.TargetTable} WHERE {spec.TargetDateColumn} >= @cutoff",
+                        $"DELETE FROM {qualifiedTarget} WHERE {spec.TargetDateColumn} >= @cutoff",
                         cmd => cmd.Parameters.AddWithValue("cutoff", cutoff.Date));
 
                     await ExecAsync(
                         target,
                         targetTx,
-                        $"INSERT INTO {spec.TargetTable} ({colList}) SELECT {colList} FROM {spec.TargetTable}_staging");
+                        $"INSERT INTO {qualifiedTarget} ({colList}) SELECT {colList} FROM {qualifiedStaging}");
 
                     // The watermark is the current ERP day, not "only if rows
                     // were found". The overlap window means later syncs always
@@ -276,8 +304,8 @@ class SyncRunner
                     await ExecAsync(
                         target,
                         targetTx,
-                        """
-                        INSERT INTO sync_log (table_name, last_synced_date, last_synced_at, rows_synced)
+                        $"""
+                        INSERT INTO {Qualified("sync_log")} (table_name, last_synced_date, last_synced_at, rows_synced)
                         VALUES (@k, @d, now(), @r)
                         ON CONFLICT (table_name)
                         DO UPDATE SET
@@ -317,13 +345,14 @@ class SyncRunner
         SqlConnection source,
         DateTime cutoff)
     {
-        string stagingTable = $"{spec.TargetTable}_staging";
+        string stagingTable = Qualified($"{spec.TargetTable}_staging");
+        string qualifiedTarget = Qualified(spec.TargetTable);
 
         await using (var target = new NpgsqlConnection(_targetConnStr))
         {
-            await target.OpenAsync();
+            await OpenPgAsync(target);
             await using var createStaging = new NpgsqlCommand(
-                $"CREATE TABLE IF NOT EXISTS {stagingTable} (LIKE {spec.TargetTable} INCLUDING ALL)",
+                $"CREATE TABLE IF NOT EXISTS {stagingTable} (LIKE {qualifiedTarget} INCLUDING ALL)",
                 target);
             await createStaging.ExecuteNonQueryAsync();
 
@@ -349,7 +378,7 @@ class SyncRunner
 
         await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess);
         await using var targetConnection = new NpgsqlConnection(_targetConnStr);
-        await targetConnection.OpenAsync();
+        await OpenPgAsync(targetConnection);
 
         string colList = string.Join(", ", spec.Columns);
         await using var writer = await targetConnection.BeginBinaryImportAsync(
@@ -391,9 +420,9 @@ class SyncRunner
     private async Task<DateTime?> GetLastSyncedDateAsync(string syncKey)
     {
         await using var conn = new NpgsqlConnection(_targetConnStr);
-        await conn.OpenAsync();
+        await OpenPgAsync(conn);
         await using var cmd = new NpgsqlCommand(
-            "SELECT last_synced_date FROM sync_log WHERE table_name = @key",
+            $"SELECT last_synced_date FROM {Qualified("sync_log")} WHERE table_name = @key",
             conn);
         cmd.Parameters.AddWithValue("key", syncKey);
         object? result = await cmd.ExecuteScalarAsync();
@@ -467,7 +496,7 @@ class SyncRunner
         await using var target = new NpgsqlConnection(_targetConnStr);
         try
         {
-            await target.OpenAsync();
+            await OpenPgAsync(target);
         }
         catch (Exception ex)
         {
@@ -480,7 +509,7 @@ class SyncRunner
             try
             {
                 await using var cmd = new NpgsqlCommand(
-                    $"TRUNCATE TABLE {spec.TargetTable}_staging",
+                    $"TRUNCATE TABLE {Qualified($"{spec.TargetTable}_staging")}",
                     target);
                 await cmd.ExecuteNonQueryAsync();
             }
