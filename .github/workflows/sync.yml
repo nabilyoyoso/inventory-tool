@@ -63,12 +63,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure PostgreSQL client is available
+      - name: Ensure PostgreSQL 17 client tools are available
+        # BUGFIX (2026-08-16): the GitHub-hosted runner ships with
+        # postgresql-client pre-installed (currently 16.14), so the old
+        # "install only if missing" check here never fired — `command -v
+        # pg_dump` already succeeded. pg_dump refuses to dump from a server
+        # whose major version is newer than its own, which is exactly what
+        # failed: "server version: 17.6; pg_dump version: 16.14". This adds
+        # the official PGDG apt repository and installs postgresql-client-17
+        # explicitly and unconditionally, then puts its bin directory first
+        # on PATH so every later step's `psql`/`pg_dump` resolves to v17.
+        # If Supabase is ever upgraded past major version 17, bump the "17"
+        # below to match.
         run: |
-          if ! command -v psql >/dev/null 2>&1 || ! command -v pg_dump >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends postgresql-client
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends wget ca-certificates gnupg lsb-release
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo wget -q -O /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - name: Verify psql/pg_dump resolve to PostgreSQL 17
+        run: |
+          psql --version
+          pg_dump --version
 
       - name: Sync checkout with current main before dumping
         run: |
