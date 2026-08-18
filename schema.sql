@@ -11,7 +11,7 @@
 -- alphabetically, not in dependency order), and it deliberately excludes RLS
 -- policies and GRANT statements — those still live only in their own numbered
 -- migration files. See PROJECT_HANDOFF.md for full architecture context.
--- Generated: 2026-08-15 12:46:03.926711+00
+-- Generated: 2026-08-18 14:37:50.608555+00
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -63,6 +63,8 @@
 --   table_name (text), last_synced_date (date), last_synced_at (timestamp with time zone), rows_synced (integer)
 -- user_category_access:
 --   user_id (uuid), category (text)
+-- user_store_access:
+--   user_id (uuid), store_code (text)
 
 -- ----------------------------------------------------------------------------
 -- VIEW: vw_stock_ledger
@@ -165,6 +167,33 @@ $function$
 ;
 
 -- ----------------------------------------------------------------------------
+-- FUNCTION: admin_get_all_stores
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_get_all_stores()
+ RETURNS TABLE(store_code text, store_name text)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+    IF NOT public.fn_is_admin() THEN
+        RAISE EXCEPTION 'Not authorized';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        s.store_code,
+        s.store_name
+    FROM public.store s
+    ORDER BY
+        s.store_name,
+        s.store_code;
+END;
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
 -- FUNCTION: admin_get_category_access
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.admin_get_category_access()
@@ -181,6 +210,33 @@ BEGIN
     RETURN QUERY
     SELECT uca.user_id, uca.category
     FROM public.user_category_access uca;
+END;
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: admin_get_store_access
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_get_store_access()
+ RETURNS TABLE(user_id uuid, store_code text)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+    IF NOT public.fn_is_admin() THEN
+        RAISE EXCEPTION 'Not authorized';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        usa.user_id,
+        usa.store_code
+    FROM public.user_store_access usa
+    ORDER BY
+        usa.user_id,
+        usa.store_code;
 END;
 $function$
 
@@ -223,11 +279,92 @@ BEGIN
         RAISE EXCEPTION 'Not authorized';
     END IF;
 
-    DELETE FROM public.user_category_access WHERE user_id = p_user_id;
+    DELETE FROM public.user_category_access
+    WHERE user_id = p_user_id;
 
-    IF p_categories IS NOT NULL AND array_length(p_categories, 1) > 0 THEN
-        INSERT INTO public.user_category_access (user_id, category)
-        SELECT p_user_id, unnest(p_categories);
+    -- NULL / empty means unrestricted.
+    IF p_categories IS NOT NULL
+       AND array_length(p_categories, 1) > 0
+    THEN
+
+        IF EXISTS (
+            SELECT 1
+            FROM unnest(p_categories)
+                AS requested(category)
+            WHERE requested.category IS NULL
+               OR NOT EXISTS (
+                    SELECT 1
+                    FROM public.product_file pf
+                    WHERE pf.category = requested.category
+               )
+        ) THEN
+            RAISE EXCEPTION
+                'One or more selected categories do not exist in the current product catalog.';
+        END IF;
+
+        INSERT INTO public.user_category_access (
+            user_id,
+            category
+        )
+        SELECT DISTINCT
+            p_user_id,
+            requested.category
+        FROM unnest(p_categories)
+            AS requested(category)
+        WHERE requested.category IS NOT NULL;
+    END IF;
+END;
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: admin_set_user_stores
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_set_user_stores(p_user_id uuid, p_store_codes text[])
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+BEGIN
+    IF NOT public.fn_is_admin() THEN
+        RAISE EXCEPTION 'Not authorized';
+    END IF;
+
+    DELETE FROM public.user_store_access
+    WHERE user_id = p_user_id;
+
+    -- NULL / empty means unrestricted.
+    IF p_store_codes IS NOT NULL
+       AND array_length(p_store_codes, 1) > 0
+    THEN
+
+        IF EXISTS (
+            SELECT 1
+            FROM unnest(p_store_codes)
+                AS requested(store_code)
+            WHERE requested.store_code IS NULL
+               OR NOT EXISTS (
+                    SELECT 1
+                    FROM public.store s
+                    WHERE s.store_code = requested.store_code
+               )
+        ) THEN
+            RAISE EXCEPTION
+                'One or more selected stores do not exist in the current store master.';
+        END IF;
+
+        INSERT INTO public.user_store_access (
+            user_id,
+            store_code
+        )
+        SELECT DISTINCT
+            p_user_id,
+            requested.store_code
+        FROM unnest(p_store_codes)
+            AS requested(store_code)
+        WHERE requested.store_code IS NOT NULL;
     END IF;
 END;
 $function$
@@ -284,6 +421,37 @@ $function$
 ;
 
 -- ----------------------------------------------------------------------------
+-- FUNCTION: fn_effective_store_codes
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_effective_store_codes(p_requested text[] DEFAULT NULL::text[])
+ RETURNS text[]
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH a AS (
+        SELECT public.fn_user_allowed_stores() AS allowed
+    )
+    SELECT
+        CASE
+            WHEN a.allowed IS NULL
+                THEN p_requested
+
+            WHEN p_requested IS NULL
+                THEN a.allowed
+
+            ELSE ARRAY(
+                SELECT x
+                FROM unnest(p_requested) AS x
+                WHERE x = ANY(a.allowed)
+                ORDER BY x
+            )
+        END
+    FROM a
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
 -- FUNCTION: fn_is_admin
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.fn_is_admin()
@@ -303,6 +471,7 @@ $function$
 CREATE OR REPLACE FUNCTION public.fn_pending_stock(as_of_date date, p_store_codes text[] DEFAULT NULL::text[])
  RETURNS TABLE(store_code text, barcode text, sal_barcode text, pending_stock numeric)
  LANGUAGE sql
+ STABLE
 AS $function$
     WITH delivered AS (
         SELECT
@@ -311,7 +480,7 @@ AS $function$
             barcode,
             sal_barcode,
             SUM(del_qty) AS del_qty
-        FROM store_delivery_details
+        FROM public.store_delivery_details
         WHERE txn_date <= as_of_date
           AND TRIM(UPPER(status)) IS DISTINCT FROM 'REJECTED'
           AND (p_store_codes IS NULL OR delivery_to = ANY(p_store_codes))
@@ -323,22 +492,30 @@ AS $function$
             barcode,
             sal_barcode,
             SUM(rcv_qty) AS rcv_qty
-        FROM store_delivery_receive
+        FROM public.store_delivery_receive
         WHERE txn_date <= as_of_date
           AND (p_store_codes IS NULL OR delivery_to = ANY(p_store_codes))
         GROUP BY challan_no, barcode, sal_barcode
+    ),
+    per_challan AS (
+        SELECT
+            d.store_code,
+            d.barcode,
+            d.sal_barcode,
+            GREATEST(d.del_qty - COALESCE(r.rcv_qty, 0), 0) AS pending_qty
+        FROM delivered d
+        LEFT JOIN received r
+          ON r.challan_no = d.challan_no
+         AND r.barcode = d.barcode
+         AND r.sal_barcode = d.sal_barcode
     )
     SELECT
-        d.store_code,
-        d.barcode,
-        d.sal_barcode,
-        SUM(d.del_qty - COALESCE(r.rcv_qty, 0)) AS pending_stock
-    FROM delivered d
-    LEFT JOIN received r
-        ON r.challan_no  = d.challan_no
-       AND r.barcode     = d.barcode
-       AND r.sal_barcode = d.sal_barcode
-    GROUP BY d.store_code, d.barcode, d.sal_barcode
+        store_code,
+        barcode,
+        sal_barcode,
+        SUM(pending_qty) AS pending_stock
+    FROM per_challan
+    GROUP BY store_code, barcode, sal_barcode;
 $function$
 
 ;
@@ -404,14 +581,48 @@ $function$
 -- FUNCTION: fn_sale_barcode_stock_period
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.fn_sale_barcode_stock_period(as_of_date date, p_store_codes text[] DEFAULT NULL::text[])
- RETURNS TABLE(store_code text, barcode text, sal_barcode text, start_date date, end_date date, stock_age_days numeric)
+ RETURNS TABLE(store_code text, barcode text, sal_barcode text, first_stock_date date, last_stock_date date, stock_age_days numeric)
  LANGUAGE sql
 AS $function$
-    SELECT store_code, barcode, sal_barcode,
-           MIN(cycle_start) AS start_date,
-           MAX(cycle_end)   AS end_date,
-           SUM(cycle_end - cycle_start + 1)::numeric AS stock_age_days
-    FROM fn_sale_barcode_stock_cycles(as_of_date, p_store_codes)
+    SELECT
+        store_code,
+        barcode,
+        sal_barcode,
+        MIN(cycle_start) AS first_stock_date,
+        MAX(cycle_end)   AS last_stock_date,
+        SUM(
+            cycle_end - cycle_start + 1
+        )::numeric AS stock_age_days
+    FROM public.fn_sale_barcode_stock_cycles(
+        as_of_date,
+        p_store_codes
+    )
+    GROUP BY
+        store_code,
+        barcode,
+        sal_barcode
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: fn_stock_opening_onhand
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_stock_opening_onhand(as_of_date date, p_store_codes text[] DEFAULT NULL::text[])
+ RETURNS TABLE(store_code text, barcode text, sal_barcode text, opening_qty numeric, onhand_qty numeric)
+ LANGUAGE sql
+AS $function$
+    SELECT
+        store_code,
+        barcode,
+        sal_barcode,
+        COALESCE(SUM(in_qty)  FILTER (WHERE txn_date <= as_of_date - 1), 0)
+            - COALESCE(SUM(out_qty) FILTER (WHERE txn_date <= as_of_date - 1), 0) AS opening_qty,
+        COALESCE(SUM(in_qty)  FILTER (WHERE txn_date <= as_of_date), 0)
+            - COALESCE(SUM(out_qty) FILTER (WHERE txn_date <= as_of_date), 0)     AS onhand_qty
+    FROM vw_stock_ledger
+    WHERE txn_date <= as_of_date
+      AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
     GROUP BY store_code, barcode, sal_barcode
 $function$
 
@@ -442,9 +653,79 @@ CREATE OR REPLACE FUNCTION public.fn_user_allowed_categories()
  LANGUAGE sql
  STABLE
 AS $function$
-    SELECT ARRAY_AGG(category)
-    FROM public.user_category_access
-    WHERE user_id = auth.uid()
+    SELECT ARRAY_AGG(
+        uca.category
+        ORDER BY uca.category
+    )
+    FROM public.user_category_access uca
+    WHERE uca.user_id = auth.uid()
+      AND EXISTS (
+          SELECT 1
+          FROM public.product_file pf
+          WHERE pf.category = uca.category
+      )
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: fn_user_allowed_stores
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_user_allowed_stores()
+ RETURNS text[]
+ LANGUAGE sql
+ STABLE
+AS $function$
+    SELECT ARRAY_AGG(
+        usa.store_code
+        ORDER BY usa.store_code
+    )
+    FROM public.user_store_access usa
+    WHERE usa.user_id = auth.uid()
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: fn_validate_report_master_integrity
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_validate_report_master_integrity()
+ RETURNS boolean
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.store
+        WHERE store_code IS NOT NULL
+        GROUP BY store_code
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'Report blocked: duplicate store_code exists in store master.';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.product_file
+        WHERE barcode IS NOT NULL
+        GROUP BY barcode
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'Report blocked: duplicate barcode exists in product_file master.';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.product_stock
+        WHERE sal_barcode IS NOT NULL
+        GROUP BY sal_barcode
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'Report blocked: duplicate sal_barcode exists in product_stock master.';
+    END IF;
+
+    RETURN TRUE;
+END;
 $function$
 
 ;
@@ -456,24 +737,85 @@ CREATE OR REPLACE FUNCTION public.get_barcode_wise_report(as_of_date date, p_sto
  RETURNS TABLE(report_date date, store_name text, barcode text, user_barcode text, category text, sub_category text, item_name text, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, lt_sale_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric, stock_age_days numeric)
  LANGUAGE sql
 AS $function$
-    WITH agg AS (
+    WITH batch AS (
         SELECT
-            r.store_name, r.barcode, r.user_barcode, r.category, r.sub_category, r.item_name,
-            SUM(r.opening_stock_qty)  AS opening_stock_qty,
-            SUM(r.on_hand_stock_qty)  AS on_hand_stock_qty,
-            SUM(r.pending_stock_qty)  AS pending_stock_qty,
-            SUM(r.gross_stock_qty)    AS gross_stock_qty,
-            SUM(r.lt_sale_qty)        AS lt_sale_qty,
-            SUM(r.opening_cost_value) AS opening_cost_value,
-            SUM(r.on_hand_cost_value) AS on_hand_cost_value,
-            SUM(r.pending_cost_value) AS pending_cost_value,
-            SUM(r.gross_cost_value)   AS gross_cost_value,
-            SUM(r.opening_sal_value)  AS opening_sal_value,
-            SUM(r.on_hand_sal_value)  AS on_hand_sal_value,
-            SUM(r.pending_sal_value)  AS pending_sal_value,
-            SUM(r.gross_sal_value)    AS gross_sal_value
-        FROM get_sale_barcode_wise_report(as_of_date, p_store_codes, p_category, p_sub_category, NULL) r
-        GROUP BY r.store_name, r.barcode, r.user_barcode, r.category, r.sub_category, r.item_name
+            COALESCE(so.store_code, p.store_code)      AS store_code,
+            COALESCE(so.barcode,    p.barcode)          AS barcode,
+            COALESCE(so.sal_barcode, p.sal_barcode)    AS sal_barcode,
+            COALESCE(so.opening_qty, 0)   AS opening_qty,
+            COALESCE(so.onhand_qty, 0)    AS on_hand_qty,
+            COALESCE(p.pending_stock, 0)  AS pending_qty
+        FROM fn_stock_opening_onhand(as_of_date, p_store_codes) so
+        FULL OUTER JOIN fn_pending_stock(as_of_date, p_store_codes) p
+            ON so.store_code = p.store_code AND so.barcode = p.barcode AND so.sal_barcode = p.sal_barcode
+    ),
+    lt_sale AS (
+        SELECT store_code, barcode, sal_barcode,
+               SUM(sale_qty) - SUM(rtn_qty) AS lt_sale_qty
+        FROM sale
+        WHERE txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
+        GROUP BY store_code, barcode, sal_barcode
+    ),
+    store_has_history AS (
+        SELECT DISTINCT store_code, barcode
+        FROM vw_stock_ledger
+        WHERE (in_qty <> 0 OR out_qty <> 0)
+          AND txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
+    ),
+    priced AS (
+        SELECT
+            s.store_name, b.barcode, pf.user_barcode, pf.category, pf.sub_category, pf.item_name,
+            b.opening_qty,
+            b.on_hand_qty,
+            b.pending_qty,
+            b.on_hand_qty + b.pending_qty                AS gross_qty,
+            COALESCE(ls.lt_sale_qty, 0)                    AS lt_sale_qty,
+            b.opening_qty * ps.cpu                         AS opening_cost_value,
+            b.on_hand_qty * ps.cpu                         AS on_hand_cost_value,
+            b.pending_qty * ps.cpu                         AS pending_cost_value,
+            (b.on_hand_qty + b.pending_qty) * ps.cpu       AS gross_cost_value,
+            b.opening_qty * ps.mrp                         AS opening_sal_value,
+            b.on_hand_qty * ps.mrp                         AS on_hand_sal_value,
+            b.pending_qty * ps.mrp                         AS pending_sal_value,
+            (b.on_hand_qty + b.pending_qty) * ps.mrp       AS gross_sal_value
+        FROM batch b
+        JOIN store s         ON s.store_code = b.store_code
+        JOIN product_file pf ON pf.barcode   = b.barcode
+        LEFT JOIN product_stock ps ON ps.sal_barcode = b.sal_barcode
+        LEFT JOIN lt_sale ls
+            ON ls.store_code = b.store_code AND ls.barcode = b.barcode AND ls.sal_barcode = b.sal_barcode
+        WHERE (p_store_codes IS NULL OR b.store_code = ANY(p_store_codes))
+          AND (p_category IS NULL OR pf.category = ANY(p_category))
+          AND (p_sub_category IS NULL OR pf.sub_category = ANY(p_sub_category))
+          AND (public.fn_user_allowed_categories() IS NULL OR pf.category = ANY(public.fn_user_allowed_categories()))
+          AND (
+                b.store_code = '100010001'
+                OR EXISTS (
+                    SELECT 1 FROM store_has_history hh
+                    WHERE hh.store_code = b.store_code AND hh.barcode = b.barcode
+                )
+              )
+    ),
+    agg AS (
+        SELECT
+            store_name, barcode, user_barcode, category, sub_category, item_name,
+            SUM(opening_qty)         AS opening_stock_qty,
+            SUM(on_hand_qty)         AS on_hand_stock_qty,
+            SUM(pending_qty)         AS pending_stock_qty,
+            SUM(gross_qty)           AS gross_stock_qty,
+            SUM(lt_sale_qty)         AS lt_sale_qty,
+            SUM(opening_cost_value)  AS opening_cost_value,
+            SUM(on_hand_cost_value)  AS on_hand_cost_value,
+            SUM(pending_cost_value)  AS pending_cost_value,
+            SUM(gross_cost_value)    AS gross_cost_value,
+            SUM(opening_sal_value)   AS opening_sal_value,
+            SUM(on_hand_sal_value)   AS on_hand_sal_value,
+            SUM(pending_sal_value)   AS pending_sal_value,
+            SUM(gross_sal_value)     AS gross_sal_value
+        FROM priced
+        GROUP BY store_name, barcode, user_barcode, category, sub_category, item_name
     )
     SELECT
         as_of_date AS report_date,
@@ -499,11 +841,24 @@ CREATE OR REPLACE FUNCTION public.get_distinct_categories()
  RETURNS TABLE(category text)
  LANGUAGE sql
 AS $function$
-    SELECT DISTINCT category
-    FROM product_file
-    WHERE category IS NOT NULL
-      AND (public.fn_user_allowed_categories() IS NULL OR category = ANY(public.fn_user_allowed_categories()))
-    ORDER BY category
+
+    SELECT DISTINCT
+        pf.category
+
+    FROM public.product_file pf
+
+    WHERE pf.category IS NOT NULL
+
+      AND (
+          public.fn_user_allowed_categories() IS NULL
+          OR pf.category = ANY(
+              public.fn_user_allowed_categories()
+          )
+      )
+
+    ORDER BY
+        pf.category
+
 $function$
 
 ;
@@ -515,9 +870,39 @@ CREATE OR REPLACE FUNCTION public.get_distinct_sub_categories()
  RETURNS TABLE(sub_category text)
  LANGUAGE sql
 AS $function$
+
+    SELECT DISTINCT
+        pf.sub_category
+
+    FROM public.product_file pf
+
+    WHERE pf.sub_category IS NOT NULL
+
+      AND (
+          public.fn_user_allowed_categories() IS NULL
+          OR pf.category = ANY(
+              public.fn_user_allowed_categories()
+          )
+      )
+
+    ORDER BY
+        pf.sub_category
+
+$function$
+
+;
+
+-- ----------------------------------------------------------------------------
+-- FUNCTION: get_distinct_sub_categories_for_categories
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.get_distinct_sub_categories_for_categories(p_category text[] DEFAULT NULL::text[])
+ RETURNS TABLE(sub_category text)
+ LANGUAGE sql
+AS $function$
     SELECT DISTINCT sub_category
     FROM product_file
     WHERE sub_category IS NOT NULL
+      AND (p_category IS NULL OR category = ANY(p_category))
       AND (public.fn_user_allowed_categories() IS NULL OR category = ANY(public.fn_user_allowed_categories()))
     ORDER BY sub_category
 $function$
@@ -533,19 +918,15 @@ CREATE OR REPLACE FUNCTION public.get_sale_barcode_wise_report(as_of_date date, 
 AS $function$
     WITH batch AS (
         SELECT
-            COALESCE(o.store_code, h.store_code, p.store_code)      AS store_code,
-            COALESCE(o.barcode,    h.barcode,    p.barcode)          AS barcode,
-            COALESCE(o.sal_barcode, h.sal_barcode, p.sal_barcode)    AS sal_barcode,
-            COALESCE(o.stock_qty, 0)   AS opening_qty,
-            COALESCE(h.stock_qty, 0)   AS on_hand_qty,
-            COALESCE(p.pending_stock, 0) AS pending_qty
-        FROM fn_stock_qty(as_of_date - 1, p_store_codes) o
-        FULL OUTER JOIN fn_stock_qty(as_of_date, p_store_codes) h
-            ON o.store_code = h.store_code AND o.barcode = h.barcode AND o.sal_barcode = h.sal_barcode
+            COALESCE(so.store_code, p.store_code)      AS store_code,
+            COALESCE(so.barcode,    p.barcode)          AS barcode,
+            COALESCE(so.sal_barcode, p.sal_barcode)    AS sal_barcode,
+            COALESCE(so.opening_qty, 0)   AS opening_qty,
+            COALESCE(so.onhand_qty, 0)    AS on_hand_qty,
+            COALESCE(p.pending_stock, 0)  AS pending_qty
+        FROM fn_stock_opening_onhand(as_of_date, p_store_codes) so
         FULL OUTER JOIN fn_pending_stock(as_of_date, p_store_codes) p
-            ON COALESCE(o.store_code, h.store_code) = p.store_code
-           AND COALESCE(o.barcode, h.barcode) = p.barcode
-           AND COALESCE(o.sal_barcode, h.sal_barcode) = p.sal_barcode
+            ON so.store_code = p.store_code AND so.barcode = p.barcode AND so.sal_barcode = p.sal_barcode
     ),
     lt_sale AS (
         SELECT store_code, barcode, sal_barcode,
@@ -622,24 +1003,85 @@ CREATE OR REPLACE FUNCTION public.get_store_wise_report(as_of_date date, p_store
  RETURNS TABLE(store_name text, opening_stock_qty numeric, on_hand_stock_qty numeric, pending_stock_qty numeric, gross_stock_qty numeric, lt_sale_qty numeric, opening_cost_value numeric, on_hand_cost_value numeric, pending_cost_value numeric, gross_cost_value numeric, opening_sal_value numeric, on_hand_sal_value numeric, pending_sal_value numeric, gross_sal_value numeric)
  LANGUAGE sql
 AS $function$
+    WITH batch AS (
+        SELECT
+            COALESCE(so.store_code, p.store_code)      AS store_code,
+            COALESCE(so.barcode,    p.barcode)          AS barcode,
+            COALESCE(so.sal_barcode, p.sal_barcode)    AS sal_barcode,
+            COALESCE(so.opening_qty, 0)   AS opening_qty,
+            COALESCE(so.onhand_qty, 0)    AS on_hand_qty,
+            COALESCE(p.pending_stock, 0)  AS pending_qty
+        FROM fn_stock_opening_onhand(as_of_date, p_store_codes) so
+        FULL OUTER JOIN fn_pending_stock(as_of_date, p_store_codes) p
+            ON so.store_code = p.store_code AND so.barcode = p.barcode AND so.sal_barcode = p.sal_barcode
+    ),
+    lt_sale AS (
+        SELECT store_code, barcode, sal_barcode,
+               SUM(sale_qty) - SUM(rtn_qty) AS lt_sale_qty
+        FROM sale
+        WHERE txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
+        GROUP BY store_code, barcode, sal_barcode
+    ),
+    store_has_history AS (
+        SELECT DISTINCT store_code, barcode
+        FROM vw_stock_ledger
+        WHERE (in_qty <> 0 OR out_qty <> 0)
+          AND txn_date <= as_of_date
+          AND (p_store_codes IS NULL OR store_code = ANY(p_store_codes))
+    ),
+    priced AS (
+        SELECT
+            s.store_name,
+            b.opening_qty,
+            b.on_hand_qty,
+            b.pending_qty,
+            b.on_hand_qty + b.pending_qty                AS gross_qty,
+            COALESCE(ls.lt_sale_qty, 0)                    AS lt_sale_qty,
+            b.opening_qty * ps.cpu                         AS opening_cost_value,
+            b.on_hand_qty * ps.cpu                         AS on_hand_cost_value,
+            b.pending_qty * ps.cpu                         AS pending_cost_value,
+            (b.on_hand_qty + b.pending_qty) * ps.cpu       AS gross_cost_value,
+            b.opening_qty * ps.mrp                         AS opening_sal_value,
+            b.on_hand_qty * ps.mrp                         AS on_hand_sal_value,
+            b.pending_qty * ps.mrp                         AS pending_sal_value,
+            (b.on_hand_qty + b.pending_qty) * ps.mrp       AS gross_sal_value
+        FROM batch b
+        JOIN store s         ON s.store_code = b.store_code
+        JOIN product_file pf ON pf.barcode   = b.barcode
+        LEFT JOIN product_stock ps ON ps.sal_barcode = b.sal_barcode
+        LEFT JOIN lt_sale ls
+            ON ls.store_code = b.store_code AND ls.barcode = b.barcode AND ls.sal_barcode = b.sal_barcode
+        WHERE (p_store_codes IS NULL OR b.store_code = ANY(p_store_codes))
+          AND (p_category IS NULL OR pf.category = ANY(p_category))
+          AND (p_sub_category IS NULL OR pf.sub_category = ANY(p_sub_category))
+          AND (public.fn_user_allowed_categories() IS NULL OR pf.category = ANY(public.fn_user_allowed_categories()))
+          AND (
+                b.store_code = '100010001'
+                OR EXISTS (
+                    SELECT 1 FROM store_has_history hh
+                    WHERE hh.store_code = b.store_code AND hh.barcode = b.barcode
+                )
+              )
+    )
     SELECT
-        r.store_name,
-        SUM(r.opening_stock_qty)  AS opening_stock_qty,
-        SUM(r.on_hand_stock_qty)  AS on_hand_stock_qty,
-        SUM(r.pending_stock_qty)  AS pending_stock_qty,
-        SUM(r.gross_stock_qty)    AS gross_stock_qty,
-        SUM(r.lt_sale_qty)        AS lt_sale_qty,
-        SUM(r.opening_cost_value) AS opening_cost_value,
-        SUM(r.on_hand_cost_value) AS on_hand_cost_value,
-        SUM(r.pending_cost_value) AS pending_cost_value,
-        SUM(r.gross_cost_value)   AS gross_cost_value,
-        SUM(r.opening_sal_value)  AS opening_sal_value,
-        SUM(r.on_hand_sal_value)  AS on_hand_sal_value,
-        SUM(r.pending_sal_value)  AS pending_sal_value,
-        SUM(r.gross_sal_value)    AS gross_sal_value
-    FROM get_sale_barcode_wise_report(as_of_date, p_store_codes, p_category, p_sub_category, NULL) r
-    GROUP BY r.store_name
-    ORDER BY r.store_name
+        store_name,
+        SUM(opening_qty)         AS opening_stock_qty,
+        SUM(on_hand_qty)         AS on_hand_stock_qty,
+        SUM(pending_qty)         AS pending_stock_qty,
+        SUM(gross_qty)           AS gross_stock_qty,
+        SUM(lt_sale_qty)         AS lt_sale_qty,
+        SUM(opening_cost_value)  AS opening_cost_value,
+        SUM(on_hand_cost_value)  AS on_hand_cost_value,
+        SUM(pending_cost_value)  AS pending_cost_value,
+        SUM(gross_cost_value)    AS gross_cost_value,
+        SUM(opening_sal_value)   AS opening_sal_value,
+        SUM(on_hand_sal_value)   AS on_hand_sal_value,
+        SUM(pending_sal_value)   AS pending_sal_value,
+        SUM(gross_sal_value)     AS gross_sal_value
+    FROM priced
+    GROUP BY store_name
+    ORDER BY store_name
 $function$
 
 ;
