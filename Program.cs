@@ -180,6 +180,96 @@ class SyncRunner
 
     private static string Qualified(string tableName) => $"{Schema}.{tableName}";
 
+    // BUGFIX (2026-08-20): this exact exception —
+    // "System.ArgumentException: Format of the initialization string does
+    // not conform to specification starting at index 0" thrown from inside
+    // NpgsqlConnectionStringBuilder's constructor — happens when the string
+    // handed in is a postgres:// URI (e.g. Supabase's dashboard "Session
+    // pooler" copy-paste value: postgresql://user:pass@host:5432/postgres)
+    // rather than the ADO.NET Keyword=Value;Keyword=Value format Npgsql's
+    // base parser expects. Supabase's dashboard always shows connection
+    // strings in URI form, so this will keep happening every time the
+    // secret is rotated unless the app itself handles both formats. This
+    // detects a postgres:// / postgresql:// URI and converts it before it
+    // ever reaches NpgsqlConnectionStringBuilder's strict parser; a string
+    // already in Keyword=Value format passes through unchanged.
+    private static string NormalizeTargetConnectionString(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return raw;
+        }
+
+        string trimmed = raw.Trim();
+        bool isUri = trimmed.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
+                  || trimmed.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
+
+        if (!isUri)
+        {
+            return trimmed;
+        }
+
+        Uri uri;
+        try
+        {
+            uri = new Uri(trimmed);
+        }
+        catch (UriFormatException ex)
+        {
+            throw new ArgumentException(
+                "SUPABASE_CONNECTION_STRING looks like a postgres:// URI but could not be parsed as one. " +
+                "Check for an unescaped special character in the password (e.g. '@', ':', '/', '#', '%') " +
+                "-- those need to be percent-encoded when the connection string is in URI form.",
+                ex);
+        }
+
+        string username = "";
+        string password = "";
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            string[] userParts = uri.UserInfo.Split(':', 2);
+            username = Uri.UnescapeDataString(userParts[0]);
+            password = userParts.Length > 1 ? Uri.UnescapeDataString(userParts[1]) : "";
+        }
+
+        string database = uri.AbsolutePath.TrimStart('/');
+        if (string.IsNullOrEmpty(database))
+        {
+            database = "postgres";
+        }
+
+        var uriBuilder = new NpgsqlConnectionStringBuilder
+        {
+            Host = uri.Host,
+            Port = uri.Port > 0 ? uri.Port : 5432,
+            Username = username,
+            Password = password,
+            Database = database,
+        };
+
+        // Carry over the one query-string option that's actually meaningful
+        // here. Anything else (Supabase occasionally adds things like
+        // "pgbouncer=true") is intentionally ignored rather than causing a
+        // crash -- most aren't real Npgsql connection-string keywords.
+        if (!string.IsNullOrEmpty(uri.Query))
+        {
+            foreach (string pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string[] kv = pair.Split('=', 2);
+                string key = Uri.UnescapeDataString(kv[0]);
+                string value = kv.Length > 1 ? Uri.UnescapeDataString(kv[1]) : "";
+
+                if (key.Equals("sslmode", StringComparison.OrdinalIgnoreCase)
+                    && Enum.TryParse<SslMode>(value, true, out var sslMode))
+                {
+                    uriBuilder.SslMode = sslMode;
+                }
+            }
+        }
+
+        return uriBuilder.ConnectionString;
+    }
+
     private readonly string _sourceConnStr;
     private readonly string _targetConnStr;
     private readonly Action<string> _log;
@@ -209,7 +299,7 @@ class SyncRunner
         // table's connection. CommandTimeout is set here too, so it applies to
         // every command opened against this connection string without having
         // to remember to set it at each call site.
-        var csBuilder = new NpgsqlConnectionStringBuilder(targetConnStr)
+        var csBuilder = new NpgsqlConnectionStringBuilder(NormalizeTargetConnectionString(targetConnStr))
         {
             Pooling = false,
             CommandTimeout = _targetCommandTimeoutSeconds,
