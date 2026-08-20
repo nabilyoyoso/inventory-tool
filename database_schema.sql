@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fbGEgViE4IZ8gJWua75zwx0L0D9GZwdVx3L0ZB1v003IH2uZ33rf3qb5RLka9Th
+\restrict ZLc0pAHem1B2rCczZybK3uydabtiUXcTL7lbfnE4J7ARGhBM8omrBa1I3GbvMUx
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 17.11 (Ubuntu 17.11-1.pgdg24.04+2)
@@ -64,12 +64,15 @@ DROP INDEX IF EXISTS public.idx_store_store_code;
 DROP INDEX IF EXISTS public.idx_store_dml_store_date;
 DROP INDEX IF EXISTS public.idx_store_dml_store_barcode_date;
 DROP INDEX IF EXISTS public.idx_store_dml_report;
+DROP INDEX IF EXISTS public.idx_store_dml_group;
 DROP INDEX IF EXISTS public.idx_store_dml_date_report;
 DROP INDEX IF EXISTS public.idx_store_delivery_receive_to_pending;
 DROP INDEX IF EXISTS public.idx_store_delivery_receive_to_date;
+DROP INDEX IF EXISTS public.idx_store_delivery_receive_group;
 DROP INDEX IF EXISTS public.idx_store_delivery_receive_date_pending;
 DROP INDEX IF EXISTS public.idx_store_delivery_receive_challan;
 DROP INDEX IF EXISTS public.idx_store_delivery_details_to_pending;
+DROP INDEX IF EXISTS public.idx_store_delivery_details_group;
 DROP INDEX IF EXISTS public.idx_store_delivery_details_from_report;
 DROP INDEX IF EXISTS public.idx_store_delivery_details_from_date;
 DROP INDEX IF EXISTS public.idx_store_delivery_details_date_pending;
@@ -78,14 +81,17 @@ DROP INDEX IF EXISTS public.idx_store_delivery_details_challan;
 DROP INDEX IF EXISTS public.idx_sale_store_date;
 DROP INDEX IF EXISTS public.idx_sale_store_barcode_date;
 DROP INDEX IF EXISTS public.idx_sale_report;
+DROP INDEX IF EXISTS public.idx_sale_group;
 DROP INDEX IF EXISTS public.idx_sale_date_report;
 DROP INDEX IF EXISTS public.idx_purchase_return_store_barcode_date;
 DROP INDEX IF EXISTS public.idx_purchase_return_details_store_date;
 DROP INDEX IF EXISTS public.idx_purchase_return_details_report;
+DROP INDEX IF EXISTS public.idx_purchase_return_details_group;
 DROP INDEX IF EXISTS public.idx_purchase_return_details_date_report;
 DROP INDEX IF EXISTS public.idx_purchase_rcv_store_barcode_date;
 DROP INDEX IF EXISTS public.idx_purchase_rcv_details_store_date;
 DROP INDEX IF EXISTS public.idx_purchase_rcv_details_report;
+DROP INDEX IF EXISTS public.idx_purchase_rcv_details_group;
 DROP INDEX IF EXISTS public.idx_purchase_rcv_details_date_report;
 DROP INDEX IF EXISTS public.idx_product_stock_sal_barcode_report;
 DROP INDEX IF EXISTS public.idx_product_stock_sal_barcode;
@@ -94,6 +100,7 @@ DROP INDEX IF EXISTS public.idx_product_file_barcode_report;
 DROP INDEX IF EXISTS public.idx_product_file_barcode;
 DROP INDEX IF EXISTS public.idx_inv_tracking_summary_store_date;
 DROP INDEX IF EXISTS public.idx_inv_tracking_summary_report;
+DROP INDEX IF EXISTS public.idx_inv_tracking_summary_group;
 DROP INDEX IF EXISTS public.idx_inv_tracking_summary_date_report;
 DROP INDEX IF EXISTS public.idx_inv_tracking_store_barcode_date;
 DROP INDEX IF EXISTS public.idx_delivery_receive_to_barcode_date;
@@ -1625,6 +1632,13 @@ CREATE INDEX idx_inv_tracking_summary_date_report ON public.inv_tracking_summary
 
 
 --
+-- Name: idx_inv_tracking_summary_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_tracking_summary_group ON public.inv_tracking_summary USING btree (store_code, barcode, sal_barcode, txn_date);
+
+
+--
 -- Name: idx_inv_tracking_summary_report; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1681,6 +1695,13 @@ CREATE INDEX idx_purchase_rcv_details_date_report ON public.purchase_rcv_details
 
 
 --
+-- Name: idx_purchase_rcv_details_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_purchase_rcv_details_group ON public.purchase_rcv_details USING btree (store_code, barcode, sal_barcode, txn_date);
+
+
+--
 -- Name: idx_purchase_rcv_details_report; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1709,6 +1730,13 @@ CREATE INDEX idx_purchase_return_details_date_report ON public.purchase_return_d
 
 
 --
+-- Name: idx_purchase_return_details_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_purchase_return_details_group ON public.purchase_return_details USING btree (store_code, barcode, sal_barcode, txn_date);
+
+
+--
 -- Name: idx_purchase_return_details_report; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1734,6 +1762,13 @@ CREATE INDEX idx_purchase_return_store_barcode_date ON public.purchase_return_de
 --
 
 CREATE INDEX idx_sale_date_report ON public.sale USING btree (txn_date, store_code, barcode, sal_barcode);
+
+
+--
+-- Name: idx_sale_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sale_group ON public.sale USING btree (store_code, barcode, sal_barcode, txn_date);
 
 
 --
@@ -1793,6 +1828,13 @@ CREATE INDEX idx_store_delivery_details_from_report ON public.store_delivery_det
 
 
 --
+-- Name: idx_store_delivery_details_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_store_delivery_details_group ON public.store_delivery_details USING btree (delivery_from, barcode, sal_barcode, txn_date);
+
+
+--
 -- Name: idx_store_delivery_details_to_pending; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1814,6 +1856,13 @@ CREATE INDEX idx_store_delivery_receive_date_pending ON public.store_delivery_re
 
 
 --
+-- Name: idx_store_delivery_receive_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_store_delivery_receive_group ON public.store_delivery_receive USING btree (delivery_to, barcode, sal_barcode, txn_date);
+
+
+--
 -- Name: idx_store_delivery_receive_to_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1832,6 +1881,13 @@ CREATE INDEX idx_store_delivery_receive_to_pending ON public.store_delivery_rece
 --
 
 CREATE INDEX idx_store_dml_date_report ON public.store_dml USING btree (txn_date, store_code, barcode, sal_barcode);
+
+
+--
+-- Name: idx_store_dml_group; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_store_dml_group ON public.store_dml USING btree (store_code, barcode, sal_barcode, txn_date);
 
 
 --
@@ -2797,5 +2853,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON T
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fbGEgViE4IZ8gJWua75zwx0L0D9GZwdVx3L0ZB1v003IH2uZ33rf3qb5RLka9Th
+\unrestrict ZLc0pAHem1B2rCczZybK3uydabtiUXcTL7lbfnE4J7ARGhBM8omrBa1I3GbvMUx
 
